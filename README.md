@@ -10,6 +10,10 @@ reads memory and moves the mouse, and that is all.
 Built from scratch on Linux: every game offset in this repository was derived by
 observing the running process, not copied from a published SDK dump.
 
+
+https://github.com/user-attachments/assets/674baa52-3006-4767-a263-29178bed3a31
+
+
 ---
 
 ## Requirements
