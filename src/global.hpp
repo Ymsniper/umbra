@@ -126,6 +126,17 @@ inline float g_aimLeadMs    = 35.f;    // ms of lead; ~ reader + present latency
 // QUICK SCOPE. A sniper's recoil is part of aiming it, and an assist that keeps
 // pulling through the shot fights that. With this on, firing hands control back
 // immediately; the aim re-arms on the next ADS press, or after a delay if set.
+// CURVED PULL. A straight line to the target is the shape no human produces;
+// detectors key on it. Adding a perpendicular component to the delta makes the
+// path arc instead, which is the "spiral aim" of Witschel & Wressnegger,
+// EuroSec 2020. Orthogonal to the smoothing: this sets the SHAPE of the path,
+// smoothing still sets the RATE, so it layers over either mode.
+inline bool  g_aimCurve       = false;
+inline float g_aimCurveX      = 1.30f;   // lateral divisor; smaller = wider arc
+inline float g_aimCurveY      = 3.90f;   // vertical divisor
+inline bool  g_aimCurveAbove  = true;    // arc above the straight line, or below
+inline float g_aimCurveJitter = 1.0f;    // per-frame variation, percent
+
 inline bool  g_aimQuickScope     = false;
 inline int   g_aimQuickRestoreMs = 0;      // 0 = only on the next ADS press
 inline bool  g_lmbHeld           = false;  // runtime: fire button, polled

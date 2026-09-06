@@ -501,6 +501,16 @@ inline void drawSettingsPanel() {
         // would release and re-arm in the same instant and do nothing at all.
         const bool qsUsable = (g_aimButton == 0);
         if (!qsUsable) ImGui::BeginDisabled();
+        ImGui::Checkbox("Curved pull", &g_aimCurve);
+        ImGui::SameLine(); ImGui::TextDisabled("(arc instead of a straight line)");
+        if (g_aimCurve) {
+            ImGui::SliderFloat("Curve lateral", &g_aimCurveX, 0.5f, 20.f, "%.2f");
+            ImGui::SliderFloat("Curve vertical", &g_aimCurveY, 0.5f, 20.f, "%.2f");
+            ImGui::SameLine(); ImGui::TextDisabled("(lower = wider)");
+            ImGui::Checkbox("Arc above", &g_aimCurveAbove);
+            ImGui::SameLine(); ImGui::TextDisabled(g_aimCurveAbove ? "" : "(below)");
+            ImGui::SliderFloat("Curve jitter (%)", &g_aimCurveJitter, 0.f, 25.f, "%.1f");
+        }
         ImGui::Checkbox("Quick scope", &g_aimQuickScope);
         ImGui::SameLine();
         ImGui::TextDisabled(qsUsable ? "(let go the moment you fire)"
@@ -853,8 +863,30 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
         g_aimLockDist  = found ? lockDist : 0.f;
 
         if (found && aimActive) {
+            float pullX = bestX, pullY = bestY;
+
+            // CURVED PULL, applied before smoothing so it shapes the path while
+            // smoothing still governs the rate. Rotating part of the delta into
+            // its perpendicular makes the approach arc rather than run straight
+            // at the target; a dead-straight line is the shape no hand draws.
+            if (g_aimCurve) {
+                auto jit = [](float v, float pct) {
+                    if (pct <= 0.f) return v;
+                    const float r = ((float)rand() / (float)RAND_MAX) * 2.f - 1.f;
+                    return v * (1.f + r * pct * 0.01f);
+                };
+                const float cx = std::max(0.10f, jit(g_aimCurveX, g_aimCurveJitter));
+                const float cy = std::max(0.10f, jit(g_aimCurveY, g_aimCurveJitter));
+                // Sign follows the direction of travel, so the arc bends the same
+                // way whichever side the target is on, and flips with "above".
+                const float sgn = (g_aimCurveAbove ? -1.f : 1.f)
+                                * ((bestX >= 0.f) ? 1.f : -1.f);
+                pullY = bestY + sgn * (bestX / cx);
+                pullX = bestX + sgn * (bestY / cy);
+            }
+
             const float s = g_aimSmooth < 1.f ? 1.f : g_aimSmooth;
-            const float mx = bestX / s, my = bestY / s;
+            const float mx = pullX / s, my = pullY / s;
             if (g_aimSmoothMode == 1) {
                 const float in = (g_aimInertia < 0.f) ? 0.f
                                : (g_aimInertia > 1.f) ? 1.f : g_aimInertia;
