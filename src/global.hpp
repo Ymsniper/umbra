@@ -122,6 +122,14 @@ inline int   g_trigCooldownMs  = 45;     // min ms between shots (rate limit)
 // already fires at the exact bone the aimbot targets.
 inline bool  g_aimPredict   = true;
 inline float g_aimLeadMs    = 35.f;    // ms of lead; ~ reader + present latency
+
+// QUICK SCOPE. A sniper's recoil is part of aiming it, and an assist that keeps
+// pulling through the shot fights that. With this on, firing hands control back
+// immediately; the aim re-arms on the next ADS press, or after a delay if set.
+inline bool  g_aimQuickScope     = false;
+inline int   g_aimQuickRestoreMs = 0;      // 0 = only on the next ADS press
+inline bool  g_lmbHeld           = false;  // runtime: fire button, polled
+inline bool  g_aimSuppressed     = false;  // runtime: released by the shot
 inline bool  g_trigSkeleton    = false;
 inline int   g_trigSkelPart    = 0;      // 0 head, 1 chest, 2 body, 3 legs, 4 ALL body
 inline bool  g_trigOnTarget    = false;  // runtime: is the crosshair on target now

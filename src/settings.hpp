@@ -79,6 +79,8 @@ inline std::map<std::string, SettingRef> settingFields() {
         {"trig_min_tol",   {SettingRef::FLOAT, &g_trigMinTol}},
         {"aim_predict",    {SettingRef::BOOL,  &g_aimPredict}},
         {"aim_lead_ms",    {SettingRef::FLOAT, &g_aimLeadMs}},
+        {"aim_quickscope", {SettingRef::BOOL,  &g_aimQuickScope}},
+        {"aim_quick_restore_ms", {SettingRef::INT, &g_aimQuickRestoreMs}},
         {"aim_visible_only",  {SettingRef::BOOL, &g_aimVisibleOnly}},
         {"trig_visible_only", {SettingRef::BOOL, &g_trigVisibleOnly}},
         {"vis_style",         {SettingRef::INT,  &g_visStyle}},

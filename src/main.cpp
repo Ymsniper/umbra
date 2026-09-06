@@ -96,6 +96,16 @@ static bool x11AimButtonDown() {
     }
 }
 
+// The fire button, read on its own: quick scope needs the shot itself, not
+// whichever button happens to be driving the aim.
+static bool x11LmbDown() {
+    if (!g_hotDpy) return false;
+    ::Window r, c; int rx, ry, wx, wy; unsigned mask = 0;
+    if (!XQueryPointer(g_hotDpy, DefaultRootWindow(g_hotDpy),
+                       &r, &c, &rx, &ry, &wx, &wy, &mask)) return false;
+    return (mask & Button1Mask) != 0;
+}
+
 // Triggerbot button: RMB held, or always-on (no button). Deliberately smaller
 // than the aimbot's choices -- the user asked for exactly "rmb held or nothing".
 static bool x11TrigButtonDown() {
@@ -475,6 +485,35 @@ int main(int argc, char* argv[]) {
             prevHome = nowHome;
             g_aimHeld = x11AimButtonDown();
             g_trigHeld = x11TrigButtonDown();
+
+            // Quick scope. The shot releases the aim; it comes back on the next
+            // ADS press, or after the restore delay if one is set.
+            {
+                static bool prevLmb = false, prevAim = false;
+                static std::chrono::steady_clock::time_point firedAt;
+                const bool lmb = x11LmbDown();
+                g_lmbHeld = lmb;
+                // aim and fire must be different buttons; see the menu note
+                if (g_aimQuickScope && g_aimButton == 0) {
+                    if (lmb && !prevLmb && g_aimHeld) {
+                        g_aimSuppressed = true;
+                        firedAt = std::chrono::steady_clock::now();
+                    }
+                    if (g_aimSuppressed) {
+                        if (g_aimHeld && !prevAim) {
+                            g_aimSuppressed = false;      // fresh ADS press
+                        } else if (g_aimQuickRestoreMs > 0) {
+                            const auto ms = std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - firedAt).count();
+                            if (ms >= g_aimQuickRestoreMs) g_aimSuppressed = false;
+                        }
+                    }
+                } else {
+                    g_aimSuppressed = false;
+                }
+                prevLmb = lmb; prevAim = g_aimHeld;
+            }
         }
 
         // INSERT toggles menu interaction. Click-through is what makes the

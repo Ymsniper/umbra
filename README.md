@@ -195,6 +195,10 @@ Pulls toward a target while the chosen mouse button is held.
 * **Prediction**: leads a moving target by its velocity. Without this the aim
   trails a moving head by a constant amount, because the position it was given
   is already a frame old by the time the mouse moves.
+* **Quick scope**: releases the aim the instant you fire, so a sniper's recoil
+  is yours to ride rather than something the assist fights. It re-arms on the
+  next ADS press, or after a delay if you set one. Needs the aim held on right
+  mouse, since the shot has to be a different button from the aim.
 
 ### Triggerbot
 

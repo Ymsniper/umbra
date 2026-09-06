@@ -434,9 +434,11 @@ inline void drawSettingsPanel() {
     ImGui::TextDisabled("| %d entities", g_entityCount);
     if (g_aimEnabled) {
         ImGui::SameLine();
-        ImGui::TextColored(g_aimHeld ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
-                                     : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                           g_aimHeld ? "| AIM" : "| aim");
+        ImGui::TextColored(g_aimSuppressed ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f)
+                           : g_aimHeld       ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
+                                             : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                           g_aimSuppressed ? "| aim released"
+                           : g_aimHeld     ? "| AIM" : "| aim");
     }
     if (g_trigEnabled) {
         ImGui::SameLine();
@@ -494,6 +496,21 @@ inline void drawSettingsPanel() {
         ImGui::Checkbox("Predict moving targets", &g_aimPredict);
         if (g_aimPredict)
             ImGui::SliderFloat("Lead (ms)", &g_aimLeadMs, 0.f, 120.f, "%.0f");
+        // Only meaningful when the aim is on a different button from the shot.
+        // On "Left mouse" or "Either" the trigger IS the aim button, so firing
+        // would release and re-arm in the same instant and do nothing at all.
+        const bool qsUsable = (g_aimButton == 0);
+        if (!qsUsable) ImGui::BeginDisabled();
+        ImGui::Checkbox("Quick scope", &g_aimQuickScope);
+        ImGui::SameLine();
+        ImGui::TextDisabled(qsUsable ? "(let go the moment you fire)"
+                                     : "(needs Hold = right mouse)");
+        if (g_aimQuickScope && qsUsable) {
+            ImGui::SliderInt("Re-arm (ms)", &g_aimQuickRestoreMs, 0, 1500);
+            ImGui::SameLine();
+            ImGui::TextDisabled(g_aimQuickRestoreMs == 0 ? "(next ADS press)" : "");
+        }
+        if (!qsUsable) ImGui::EndDisabled();
 
         ImGui::Separator();
         ImGui::TextDisabled("Target choice");
@@ -515,9 +532,12 @@ inline void drawSettingsPanel() {
         ImGui::Separator();
         ImGui::Text("%d in range", g_aimTargetCnt);
         ImGui::SameLine();
-        ImGui::TextColored(g_aimHeld ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
-                                     : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                           g_aimHeld ? "  pulling" : "  idle");
+        if (g_aimSuppressed)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  released (shot)");
+        else
+            ImGui::TextColored(g_aimHeld ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
+                                         : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                               g_aimHeld ? "  pulling" : "  idle");
         ImGui::EndTabItem();
     }
 
@@ -691,7 +711,7 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
     }
 
     // ── aim assist
-    const bool aimActive  = g_aimEnabled  && g_aimHeld;
+    const bool aimActive  = g_aimEnabled  && g_aimHeld && !g_aimSuppressed;
     const bool trigActive = g_trigEnabled && g_trigHeld;
     bool trigWantFire = false;
     if ((aimActive || trigActive) && g_vmouse.ready()) {
