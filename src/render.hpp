@@ -13,7 +13,9 @@
 #include <raylib.h>
 #include <rlgl.h>
 #include <imgui.h>
+#include <imgui_impl_raylib.h>
 #include <rlImGui.h>
+#include "x11_overlay.hpp"
 #include <cstdio>
 #include <cmath>
 
@@ -938,9 +940,27 @@ inline void renderFrame(const Font& font)
     // fire (or release) the shot; runs every frame so a held click always ends
     triggerUpdate(trigActive, trigWantFire);
 
-    // rlImGuiBegin must run every frame even when the panel is hidden: it
-    // starts ImGui's frame and feeds it input. Only the panel itself is skipped.
-    rlImGuiBegin();
+    // This is rlImGuiBegin() opened up, so the pointer can be supplied between
+    // the backend's input pass and NewFrame. The backend only feeds ImGui a
+    // mouse while raylib reports the window as focused, and parks the cursor
+    // off-screen when it does not; an overlay is override-redirect and never
+    // takes focus, so on its own the menu can be seen but not clicked. Querying
+    // the pointer instead of reading events also survives the game or the menu
+    // holding a pointer grab. It has to land after ProcessEvents to win, and
+    // before NewFrame to be seen this frame rather than the next one.
+    ImGui_ImplRaylib_NewFrame();
+    ImGui_ImplRaylib_ProcessEvents();
+    if (g_menuVisible.load() && !IsWindowFocused()) {
+        int mx = 0, my = 0; bool lmb = false, rmb = false;
+        if (ovl::pointer(mx, my, lmb, rmb)) {
+            ImGuiIO& io = ImGui::GetIO();
+            io.AddMousePosEvent((float)mx, (float)my);
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left,  lmb);
+            io.AddMouseButtonEvent(ImGuiMouseButton_Right, rmb);
+        }
+    }
+    ImGui::NewFrame();
+
     if (g_menuVisible.load()) drawSettingsPanel();
     rlImGuiEnd();
 }

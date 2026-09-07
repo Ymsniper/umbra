@@ -89,6 +89,16 @@ int ignoreError(Display* d, XErrorEvent* e) {
     return best;
 }
 
+// TOOLTIP keeps the overlay out of the taskbar and the window switcher, but a
+// window manager will not focus that type, so menu mode asks for NORMAL.
+void setWindowType(bool tooltip) {
+    Atom type = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE", False);
+    Atom val  = XInternAtom(g_dpy, tooltip ? "_NET_WM_WINDOW_TYPE_TOOLTIP"
+                                           : "_NET_WM_WINDOW_TYPE_NORMAL", False);
+    XChangeProperty(g_dpy, g_win, type, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char*)&val, 1);
+}
+
 KeySym keysymFor(int key) {
     switch (key) {
         case KeyInsert: return XK_Insert;
@@ -113,9 +123,6 @@ bool init() {
 
 void shutdown() {
     if (!g_dpy) return;
-    // Never exit holding the pointer: that would leave the desktop unusable.
-    XUngrabPointer(g_dpy, CurrentTime);
-    XUngrabKeyboard(g_dpy, CurrentTime);
     XFlush(g_dpy);
     XCloseDisplay(g_dpy);
     g_dpy = nullptr;
@@ -251,26 +258,43 @@ void setClickThrough(bool through) {
     XFlush(g_dpy);
 }
 
-void grabInput(bool grab) {
+void setMenuMode(bool on, pid_t gamePid) {
     if (!g_dpy || !g_win) return;
-    if (grab) {
-        // owner_events = True, so the events still reach the overlay's own
-        // event selection and raylib sees them; the grab only redirects them
-        // away from the game while the menu is up.
-        int r = XGrabPointer(g_dpy, g_win, True,
-                             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                             GrabModeAsync, GrabModeAsync, 0L, 0L, CurrentTime);
-        const char* why = r == 0 ? "ok"
-                        : r == 1 ? "AlreadyGrabbed (game holds it)"
-                        : r == 2 ? "InvalidTime" : r == 3 ? "NotViewable" : "Frozen";
-        printf("[x11] grab pointer: %s\n", why);
-        XGrabKeyboard(g_dpy, g_win, True, GrabModeAsync, GrabModeAsync, CurrentTime);
-    } else {
-        XUngrabPointer(g_dpy, CurrentTime);
-        XUngrabKeyboard(g_dpy, CurrentTime);
-        printf("[x11] pointer/keyboard released back to the game\n");
-    }
+
+    // override_redirect only takes effect at map time, so the mode change has
+    // to bracket an unmap and a remap.
+    XUnmapWindow(g_dpy, g_win);
+    XSync(g_dpy, False);
+    XSetWindowAttributes ora{};
+    ora.override_redirect = on ? 0 : 1;
+    XChangeWindowAttributes(g_dpy, g_win, CWOverrideRedirect, &ora);
+    setWindowType(!on);
+    XMapRaised(g_dpy, g_win);
+    XSync(g_dpy, False);
+
+    setClickThrough(!on);
+
+    // Taking focus is what makes this work: a game holding a pointer grab for
+    // mouse-look keeps every click and every scroll until it loses focus, and
+    // while it holds one no other window can grab the pointer either.
+    // SetInputFocus is a BadMatch on a window that is not viewable yet, and the
+    // remap above has not necessarily been through the window manager by now.
+    auto focusWhenReady = [](::Window w) {
+        if (!w) return;
+        for (int i = 0; i < 40; i++) {
+            XWindowAttributes at{};
+            if (XGetWindowAttributes(g_dpy, w, &at) && at.map_state == IsViewable) {
+                XSetInputFocus(g_dpy, w, RevertToPointerRoot, CurrentTime);
+                return;
+            }
+            usleep(2000);
+        }
+    };
+    if (on) focusWhenReady(g_win);
+    else    focusWhenReady(findByPid(gamePid));
     XFlush(g_dpy);
+    printf("[x11] %s\n", on ? "menu mode: focusable, clicks land on the menu"
+                            : "overlay mode: click-through, focus back to the game");
 }
 
 bool lmbDown() {
@@ -287,6 +311,20 @@ bool rmbDown() {
     if (!XQueryPointer(g_dpy, DefaultRootWindow(g_dpy),
                        &r, &c, &rx, &ry, &wx, &wy, &mask)) return false;
     return (mask & Button3Mask) != 0;      // Button2 is middle, not right
+}
+
+bool pointer(int& x, int& y, bool& lmb, bool& rmb) {
+    if (!g_dpy || !g_win) return false;
+    ::Window r, c; int rx, ry, wx, wy; unsigned mask = 0;
+    if (!XQueryPointer(g_dpy, g_win, &r, &c, &rx, &ry, &wx, &wy, &mask))
+        return false;
+    // A window caught between an unmap and the window manager placing it can
+    // report a nonsense offset; anything this far out is not a real cursor.
+    if (wx < -8192 || wx > 8192 || wy < -8192 || wy > 8192) return false;
+    x = wx; y = wy;
+    lmb = (mask & Button1Mask) != 0;
+    rmb = (mask & Button3Mask) != 0;
+    return true;
 }
 
 bool keyDown(int key) {

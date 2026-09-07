@@ -29,13 +29,23 @@ void moveResize(int x, int y, int w, int h);
 void raise();
 
 void setClickThrough(bool through);
-void grabInput(bool grab);
+
+// The overlay runs unmanaged so it never takes focus from the game, which also
+// means the menu cannot be clicked, scrolled or typed into. Menu mode turns it
+// back into an ordinary focusable window for as long as the menu is up; leaving
+// it restores the click-through overlay and hands focus back to the game.
+void setMenuMode(bool on, pid_t gamePid);
 
 // Global input state. The overlay never holds focus, so the game's clicks and
 // keys never reach its event queue; these read the server directly instead.
 bool lmbDown();
 bool rmbDown();
 bool keyDown(int key);          // see Key below
+
+// Pointer position in overlay-local pixels, with the two buttons. Queried
+// rather than taken from an event, so it is unaffected by which client holds a
+// pointer grab and by the overlay never being focused.
+bool pointer(int& x, int& y, bool& lmb, bool& rmb);
 
 enum Key { KeyHome = 0, KeyInsert, KeyEnd };
 

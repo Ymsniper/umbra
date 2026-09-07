@@ -267,11 +267,13 @@ int main(int argc, char* argv[]) {
             if (nowInsert && !prevInsert) {
                 interactive = !interactive;
                 g_menuVisible.store(interactive);
-                ovl::setClickThrough(!interactive);
-                ovl::grabInput(interactive);
-                printf("[x11] menu %s\n",
-                       interactive ? "shown + INTERACTIVE - clicks hit the overlay"
-                                   : "hidden + click-through - clicks hit the game");
+                ovl::setMenuMode(interactive, g_mem.pid);
+                // The remap goes through the window manager again, so put the
+                // window back over the game at once rather than letting it show
+                // up wherever the WM felt like until the next geometry tick.
+                int gx = 0, gy = 0, gw = 0, gh = 0;
+                if (ovl::gameRect(g_mem.pid, gx, gy, gw, gh))
+                    ovl::moveResize(gx, gy, gw, gh);
             }
             prevInsert = nowInsert;
         }
@@ -287,6 +289,9 @@ int main(int argc, char* argv[]) {
     printf("[loop] exited after %lu frames\n", frames);
 
     // 6. Cleanup
+    // Quitting with the menu up would leave the game without focus.
+    if (interactive) ovl::setMenuMode(false, g_mem.pid);
+
     g_running = false;
     if (reader.joinable()) reader.join();
     saveSettings();          // come back next launch the way the user left it
