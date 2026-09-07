@@ -99,6 +99,7 @@ inline std::map<std::string, SettingRef> settingFields() {
         {"vis_dim_alpha",     {SettingRef::INT,  &g_visDimAlpha}},
         {"vis_x_thick",       {SettingRef::FLOAT,&g_visXThick}},
         {"vis_tolerance",     {SettingRef::FLOAT,&g_visTolerance}},
+        {"menu_alpha",     {SettingRef::INT,   &g_menuAlpha}},
         {"menu_w",         {SettingRef::FLOAT, &g_menuW}},
         {"menu_h",         {SettingRef::FLOAT, &g_menuH}},
     };

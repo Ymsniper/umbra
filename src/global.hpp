@@ -179,7 +179,8 @@ inline float g_trigMinTol      = 2.0f;
 inline float g_trigOnTargetTol = 0.f;    // runtime: the tolerance used this frame
 inline float g_trigOnTargetPx  = 0.f;    // runtime: measured offset this frame
 
-// ── menu window size (resizable, persisted)
+// ── menu window (size and opacity, both persisted)
+inline int   g_menuAlpha = 225;   // background opacity of the settings window
 inline float g_menuW = 300.f;
 inline float g_menuH = 320.f;
 
@@ -200,7 +201,4 @@ inline float g_maxEspDist   = 300.f; // metres
 // instead. Match this to your in-game FOV setting or the ESP will drift.
 inline float g_fov          = 90.f;
 // g_fovScale lives in structs.hpp (used by worldToScreen there).
-// Menu visibility, toggled with INSERT alongside click-through. When the menu
-// is not interactive there is no reason to occupy the screen with it, so the
-// two are driven together rather than independently.
-inline std::atomic<bool> g_menuVisible{false};
+

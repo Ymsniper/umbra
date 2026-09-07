@@ -10,21 +10,25 @@
 #include "runtime_offsets.hpp"
 #include "settings.hpp"
 #include "x11_overlay.hpp"
+#include "shared.hpp"
 
 #include <raylib.h>
 #include <rlgl.h>
-#include <imgui.h>
-#include <rlImGui.h>
 #include <cstdio>
 #include <cstring>
 #include <thread>
 #include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+
+// menu.cpp: the settings window, run as a separate process.
+int menuMain(SharedState* sh);
 
 // Clean shutdown on Ctrl-C
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.3";
+static constexpr const char*    kUmbraVersion = "1.3.2";
 static constexpr const char*    kProcName   = "Discovery-d.exe";
 static constexpr const char*    kModuleName = "Discovery-d.exe";
 static constexpr int            kWindowW    = 1920;
@@ -76,6 +80,32 @@ static Font loadOverlayFont() {
     return f;
 }
 
+// Everything the menu shows that is not a setting it can edit itself.
+static void publishStatus(SharedState* sh) {
+    Status st;
+    st.entityCount     = g_entityCount;
+    st.aimTargetCnt    = g_aimTargetCnt;
+    st.visVisibleCnt   = g_visVisibleCnt;
+    st.visHiddenCnt    = g_visHiddenCnt;
+    st.fps             = GetFPS();
+    st.trigOnTargetPx  = g_trigOnTargetPx;
+    st.trigOnTargetTol = g_trigOnTargetTol;
+    st.camFov          = g_camView.FOV;
+    st.kmodOk          = g_mem.kmodOk;
+    st.kmodFellBack    = g_mem.kmodFellBack;
+    st.aimHeld         = g_aimHeld       ? 1 : 0;
+    st.aimSuppressed   = g_aimSuppressed ? 1 : 0;
+    st.trigHeld        = g_trigHeld      ? 1 : 0;
+    st.trigOnTarget    = g_trigOnTarget  ? 1 : 0;
+    st.visHave         = g_visHave       ? 1 : 0;
+    st.haveLastRenderTime = g_off.Mesh_LastRenderTime ? 1 : 0;
+    st.usingKmod       = g_mem.usingKmod()      ? 1 : 0;
+    st.vmouseReady     = g_vmouse.ready()       ? 1 : 0;
+    st.vmouseKernel    = g_vmouse.usingKernel() ? 1 : 0;
+    sh->status = st;
+    sh->statusGen.fetch_add(1, std::memory_order_release);
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT,  sigHandler);
     signal(SIGTERM, sigHandler);
@@ -118,6 +148,28 @@ int main(int argc, char* argv[]) {
         if (!g_running) return 1;
     }
 
+    // The menu is a separate process with an ordinary window. Its mapping is
+    // created here, before the fork, so both sides inherit it and there is no
+    // named object to clean up. Forking before any X or GL call keeps each
+    // process's graphics state entirely its own.
+    SharedState* shared = sharedCreate();
+    uint32_t settingsGen = 0;
+    pid_t menuPid = -1;
+    if (!shared) {
+        printf("[main] shared mapping failed; running without the menu\n");
+    } else {
+        shared->gamePid = (int32_t)g_mem.pid;
+        sharedWriteFields(shared);
+        settingsGen = shared->settingsGen.load();
+        menuPid = fork();
+        if (menuPid == 0) {
+            _exit(menuMain(shared));
+        }
+        if (menuPid < 0) {
+            printf("[main] could not start the menu process (%s)\n", strerror(errno));
+        }
+    }
+
     // Virtual pointer for aim assist. A SEPARATE device, so the real mouse keeps
     // working and its movement sums with ours - the assist can be fought.
     uintptr_t GWorld = 0;          // unused at runtime; reader ignores it
@@ -140,8 +192,15 @@ int main(int argc, char* argv[]) {
     // GLFW pick a multisample framebuffer config, and none of those carry an
     // alpha channel here: the window comes back at depth 24 instead of 32 and
     // the overlay is an opaque black rectangle over the game.
+    // HIDDEN matters as much as the rest: a window that is mapped even for an
+    // instant as an ordinary one is activated by the window manager, and that
+    // deactivates the game and makes it release the cursor. It is mapped in
+    // adoptOwnWindow, once it is already override-redirect and invisible to the
+    // window manager. ALWAYS_RUN keeps WindowShouldClose from blocking if the
+    // window is ever taken for minimized.
     SetConfigFlags(FLAG_WINDOW_TRANSPARENT | FLAG_WINDOW_UNDECORATED |
-                   FLAG_WINDOW_TOPMOST | FLAG_WINDOW_MOUSE_PASSTHROUGH);
+                   FLAG_WINDOW_TOPMOST | FLAG_WINDOW_MOUSE_PASSTHROUGH |
+                   FLAG_WINDOW_HIDDEN | FLAG_WINDOW_ALWAYS_RUN);
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(ow, oh, "TheFinals");
     if (!IsWindowReady()) {
@@ -156,10 +215,8 @@ int main(int argc, char* argv[]) {
     if (haveX11) {
         ovl::adoptOwnWindow("TheFinals");
         ovl::moveResize(ox, oy, ow, oh);
+        ovl::focusGame(g_mem.pid);
     }
-
-    rlImGuiSetup(true);
-    ImGui::GetStyle().Alpha = 0.9f;
 
     // raylib's BLEND_ALPHA uses the source alpha as the destination factor on
     // the alpha channel too, so a 67%-opaque box lands in the framebuffer at
@@ -176,8 +233,11 @@ int main(int argc, char* argv[]) {
     // 4. Start reader thread
     std::thread reader(readerThread, GWorld);
 
-    // 5. Main render loop
-    bool interactive = false;
+    // 5. Hand the cursor back to the game. Set UMBRA_NO_CYCLE=1 to skip it.
+    if (haveX11 && !getenv("UMBRA_NO_CYCLE"))
+        ovl::cycleGameWindow(g_mem.pid);
+
+    // 6. Main render loop
     unsigned long frames = 0;
     while (!WindowShouldClose() && g_running) {
         ++frames;
@@ -207,7 +267,6 @@ int main(int argc, char* argv[]) {
                 }
             }
             ovl::raise();
-
             // End quits. Polled rather than read from the window's event queue,
             // which only ever fills while the menu holds the pointer grab.
             if (ovl::keyDown(ovl::KeyEnd)) g_running = false;
@@ -259,23 +318,15 @@ int main(int argc, char* argv[]) {
                 prevLmb = lmb; prevAim = g_aimHeld;
             }
 
-            // INSERT toggles menu interaction. Click-through is what makes the
-            // overlay usable in-game, and it also means the menu cannot be
-            // clicked, so the two are driven together.
-            static bool prevInsert = false;
-            const bool nowInsert = ovl::keyDown(ovl::KeyInsert);
-            if (nowInsert && !prevInsert) {
-                interactive = !interactive;
-                g_menuVisible.store(interactive);
-                ovl::setMenuMode(interactive, g_mem.pid);
-                // The remap goes through the window manager again, so put the
-                // window back over the game at once rather than letting it show
-                // up wherever the WM felt like until the next geometry tick.
-                int gx = 0, gy = 0, gw = 0, gh = 0;
-                if (ovl::gameRect(g_mem.pid, gx, gy, gw, gh))
-                    ovl::moveResize(gx, gy, gw, gh);
-            }
-            prevInsert = nowInsert;
+            // INSERT belongs to the menu process; this window never takes
+            // focus and never stops being click-through.
+        }
+
+        if (shared) {
+            // A setting the menu changed, or one HOME changed here.
+            sharedPull(shared, settingsGen);
+            sharedPushIfChanged(shared, settingsGen);
+            publishStatus(shared);
         }
 
         BeginDrawing();
@@ -288,17 +339,28 @@ int main(int argc, char* argv[]) {
 
     printf("[loop] exited after %lu frames\n", frames);
 
-    // 6. Cleanup
-    // Quitting with the menu up would leave the game without focus.
-    if (interactive) ovl::setMenuMode(false, g_mem.pid);
-
+    // 7. Cleanup
     g_running = false;
     if (reader.joinable()) reader.join();
+    if (shared) {
+        if (menuPid > 0) {
+            // Let it publish any last edit and go. Never an unbounded wait: a
+            // menu that does not answer must not keep the overlay alive.
+            kill(menuPid, SIGTERM);
+            bool reaped = false;
+            for (int i = 0; i < 200 && !reaped; i++) {
+                if (waitpid(menuPid, nullptr, WNOHANG) == menuPid) reaped = true;
+                else usleep(5000);
+            }
+            if (!reaped) { kill(menuPid, SIGKILL); waitpid(menuPid, nullptr, 0); }
+        }
+        // The menu's settings live in the mapping, so they survive it exiting.
+        sharedPull(shared, settingsGen);
+    }
     saveSettings();          // come back next launch the way the user left it
-    rlImGuiShutdown();
     if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);
     CloseWindow();
-    ovl::shutdown();         // also releases the pointer grab if the menu was up
+    ovl::shutdown();
 
     if (g_mem.usingKmod())
         printf("[mem] kernel backend: %llu reads via module, %llu fell back to pvr\n",

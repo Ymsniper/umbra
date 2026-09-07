@@ -17,6 +17,7 @@ set(SOURCES
     src/main.cpp
     src/x11_overlay.cpp
     src/vmouse.cpp
+    src/menu.cpp
     third_party/rlImGui/rlImGui.cpp
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp

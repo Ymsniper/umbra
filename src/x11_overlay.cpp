@@ -19,6 +19,11 @@ namespace {
 
 Display* g_dpy = nullptr;
 ::Window g_win = 0;          // our overlay window, once adopted
+// Never mapped, never drawn. WM_TAKE_FOCUS needs a real server timestamp, and
+// the only way to obtain one is a property change on a window we own -- which
+// must not be the overlay, because selecting PropertyChangeMask on that would
+// replace the event mask raylib set on it.
+::Window g_timeWin = 0;
 
 int ignoreError(Display* d, XErrorEvent* e) {
     char buf[128] = {0};
@@ -34,7 +39,8 @@ int ignoreError(Display* d, XErrorEvent* e) {
 // the wrong one of those puts the whole ESP out by the titlebar height, so a
 // window carrying WM_STATE -- the ICCCM mark of a real top-level client -- is
 // always preferred over a plain child, and only then does area break the tie.
-::Window findByPid(pid_t pid, int* outW = nullptr, int* outH = nullptr) {
+::Window findByPid(pid_t pid, bool requireViewable = true,
+                  int* outW = nullptr, int* outH = nullptr) {
     Atom pidAtom = XInternAtom(g_dpy, "_NET_WM_PID", True);
     if (!pidAtom) return 0;
     Atom wmStateAtom = XInternAtom(g_dpy, "WM_STATE", True);
@@ -64,7 +70,7 @@ int ignoreError(Display* d, XErrorEvent* e) {
 
         XWindowAttributes at{};
         if (!XGetWindowAttributes(g_dpy, w, &at)) continue;
-        if (at.map_state != IsViewable) continue;
+        if (requireViewable && at.map_state != IsViewable) continue;
         if (at.c_class != InputOutput) continue;
 
         int rank = 0;
@@ -89,14 +95,42 @@ int ignoreError(Display* d, XErrorEvent* e) {
     return best;
 }
 
-// TOOLTIP keeps the overlay out of the taskbar and the window switcher, but a
-// window manager will not focus that type, so menu mode asks for NORMAL.
-void setWindowType(bool tooltip) {
-    Atom type = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE", False);
-    Atom val  = XInternAtom(g_dpy, tooltip ? "_NET_WM_WINDOW_TYPE_TOOLTIP"
-                                           : "_NET_WM_WINDOW_TYPE_NORMAL", False);
-    XChangeProperty(g_dpy, g_win, type, XA_ATOM, 32, PropModeReplace,
-                    (unsigned char*)&val, 1);
+// A valid server timestamp, from the PropertyNotify our own change generates.
+Time serverTime() {
+    if (!g_timeWin) return CurrentTime;
+    Atom a = XInternAtom(g_dpy, "_UMBRA_TIMESTAMP", False);
+    unsigned char zero = 0;
+    XChangeProperty(g_dpy, g_timeWin, a, XA_STRING, 8, PropModeReplace, &zero, 1);
+    XFlush(g_dpy);
+    XEvent ev;
+    for (int i = 0; i < 200; i++) {
+        if (XCheckWindowEvent(g_dpy, g_timeWin, PropertyChangeMask, &ev))
+            return ev.xproperty.time;
+        usleep(500);
+    }
+    return CurrentTime;
+}
+
+// ICCCM: how a window manager tells a client "you have the focus now, activate
+// yourself". Wine answers it with SetForegroundWindow, which is what makes the
+// game re-apply its cursor clip.
+void sendTakeFocus(::Window w) {
+    Atom wmProtocols = XInternAtom(g_dpy, "WM_PROTOCOLS",  False);
+    Atom wmTakeFocus = XInternAtom(g_dpy, "WM_TAKE_FOCUS", False);
+    Atom* protos = nullptr; int n = 0;
+    if (!XGetWMProtocols(g_dpy, w, &protos, &n)) return;
+    bool supported = false;
+    for (int i = 0; i < n; i++) if (protos[i] == wmTakeFocus) supported = true;
+    if (protos) XFree(protos);
+    if (!supported) return;
+    XEvent ev = {};
+    ev.type                 = ClientMessage;
+    ev.xclient.window       = w;
+    ev.xclient.message_type = wmProtocols;
+    ev.xclient.format       = 32;
+    ev.xclient.data.l[0]    = (long)wmTakeFocus;
+    ev.xclient.data.l[1]    = (long)serverTime();
+    XSendEvent(g_dpy, w, False, NoEventMask, &ev);
 }
 
 KeySym keysymFor(int key) {
@@ -118,11 +152,15 @@ bool init() {
                "[x11] Run with: DISPLAY=:0 ./TheFinals --pid <PID>\n");
         return false;
     }
+    g_timeWin = XCreateSimpleWindow(g_dpy, DefaultRootWindow(g_dpy),
+                                    -10, -10, 1, 1, 0, 0, 0);
+    XSelectInput(g_dpy, g_timeWin, PropertyChangeMask);
     return true;
 }
 
 void shutdown() {
     if (!g_dpy) return;
+    if (g_timeWin) { XDestroyWindow(g_dpy, g_timeWin); g_timeWin = 0; }
     XFlush(g_dpy);
     XCloseDisplay(g_dpy);
     g_dpy = nullptr;
@@ -160,7 +198,7 @@ bool gameRect(pid_t gamePid, int& x, int& y, int& w, int& h) {
 
 bool adoptOwnWindow(const char* title) {
     if (!g_dpy) return false;
-    g_win = findByPid(getpid());
+    g_win = findByPid(getpid(), false);
     if (!g_win) {
         printf("[x11] could not find our own window in the tree; "
                "overlay properties skipped\n");
@@ -176,25 +214,34 @@ bool adoptOwnWindow(const char* title) {
 
     // override-redirect must be set while the window is UNMAPPED: a window
     // manager reads the flag when the window is mapped and ignores it after.
-    // While the window is managed it carries a decoration frame, moves are
-    // relative to that frame rather than to the screen, and the WM is free to
-    // place it where it likes. Unmapped it is neither framed nor reparented,
-    // and absolute coordinates land exactly where they are asked to.
+    // The window is created hidden precisely so this can happen before it is
+    // ever shown. A window that is mapped even briefly as an ordinary one gets
+    // activated by the window manager, and that deactivates the game, which
+    // then drops the pointer it grabbed for mouse-look.
     Atom wmWindowType    = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE",         False);
     Atom wmWindowTypeTip = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE_TOOLTIP", False);
     XChangeProperty(g_dpy, g_win, wmWindowType, XA_ATOM, 32,
                     PropModeReplace, (unsigned char*)&wmWindowTypeTip, 1);
 
-    XUnmapWindow(g_dpy, g_win);
-    XSync(g_dpy, False);
     XSetWindowAttributes ora{};
     ora.override_redirect = 1;
     XChangeWindowAttributes(g_dpy, g_win, CWOverrideRedirect, &ora);
+
+    // Click-through BEFORE the first map, never after. Confining the cursor is
+    // a compositor pointer constraint, and a constraint only lives while its
+    // surface holds pointer focus. A window that appears over the game with a
+    // full input region takes that focus for the moment before its shape is
+    // applied, which is enough to cancel the game's confinement -- and the game
+    // does not ask for it again until it is next activated. Emptying the input
+    // region first means the overlay is never a candidate for pointer focus at
+    // all, so the game never notices it.
+    setClickThrough(true);
+
     XMapRaised(g_dpy, g_win);
     XSync(g_dpy, False);
 
-    // Confirm it actually came back unmanaged; if a WM still owns it the
-    // positioning below will be off and it is worth saying so out loud.
+    // Confirm it really is unmanaged; if a window manager owns it, positioning
+    // will be off and it is worth saying so out loud.
     XWindowAttributes after{};
     ::Window root = 0, parent = 0, *kids = nullptr; unsigned nk = 0;
     bool reparented = false;
@@ -205,9 +252,6 @@ bool adoptOwnWindow(const char* title) {
     XGetWindowAttributes(g_dpy, g_win, &after);
     printf("[x11] overlay unmanaged: override_redirect=%d parent=%s\n",
            after.override_redirect, reparented ? "WM FRAME (unexpected)" : "root");
-
-    // Click-through: an empty input shape, so clicks reach the game underneath.
-    setClickThrough(true);
 
     XFlush(g_dpy);
     printf("[x11] overlay ready: click-through, on top, no taskbar entry\n");
@@ -258,43 +302,121 @@ void setClickThrough(bool through) {
     XFlush(g_dpy);
 }
 
-void setMenuMode(bool on, pid_t gamePid) {
-    if (!g_dpy || !g_win) return;
+// Is `w` the window `root_of` or nested inside it? The focus often lands on an
+// inner drawable rather than the top-level client, which still counts.
+bool focusInside(::Window w, ::Window container) {
+    for (int depth = 0; w && depth < 32; depth++) {
+        if (w == container) return true;
+        ::Window root = 0, parent = 0, *kids = nullptr; unsigned nk = 0;
+        if (!XQueryTree(g_dpy, w, &root, &parent, &kids, &nk)) return false;
+        if (kids) XFree(kids);
+        if (parent == root) return false;
+        w = parent;
+    }
+    return false;
+}
 
-    // override_redirect only takes effect at map time, so the mode change has
-    // to bracket an unmap and a remap.
-    XUnmapWindow(g_dpy, g_win);
+void focusGame(pid_t gamePid) {
+    if (!g_dpy) return;
+    ::Window gw = findByPid(gamePid);
+    if (!gw) return;
+
+    Atom active = XInternAtom(g_dpy, "_NET_ACTIVE_WINDOW", False);
+
+    // Unmapping the overlay makes the window manager pick a new focus window on
+    // its own, and that decision can land after this request. Ask, check, and
+    // ask again until it sticks rather than firing once and hoping.
+    for (int attempt = 0; attempt < 15; attempt++) {
+        // _NET_ACTIVE_WINDOW is the request a window manager acts on: it
+        // activates the window the way a click would, which is the event Wine
+        // answers by re-grabbing and re-clipping the cursor. Source indication
+        // 2 marks it as coming from a pager, so focus-stealing prevention does
+        // not drop it.
+        XEvent ev = {};
+        ev.type                 = ClientMessage;
+        ev.xclient.window       = gw;
+        ev.xclient.message_type = active;
+        ev.xclient.format       = 32;
+        ev.xclient.data.l[0]    = 2;
+        ev.xclient.data.l[1]    = CurrentTime;
+        ev.xclient.data.l[2]    = 0;
+        XSendEvent(g_dpy, DefaultRootWindow(g_dpy), False,
+                   SubstructureNotifyMask | SubstructureRedirectMask, &ev);
+
+        // Direct route as well, for the case where no window manager answers.
+        XWindowAttributes at{};
+        if (XGetWindowAttributes(g_dpy, gw, &at) && at.map_state == IsViewable)
+            XSetInputFocus(g_dpy, gw, RevertToPointerRoot, CurrentTime);
+        sendTakeFocus(gw);
+        XSync(g_dpy, False);
+
+        ::Window focus = 0; int revert = 0;
+        XGetInputFocus(g_dpy, &focus, &revert);
+        if (focusInside(focus, gw)) return;
+        usleep(4000);
+    }
+    printf("[x11] could not hand focus back to the game; "
+           "click the game window to give it the mouse\n");
+}
+
+void cycleGameWindow(pid_t gamePid) {
+    if (!g_dpy) return;
+    ::Window gw = findByPid(gamePid);
+    if (!gw) {
+        printf("[x11] no game window to cycle\n");
+        return;
+    }
+    printf("[x11] minimising and restoring the game so it re-takes the cursor\n");
+    fflush(stdout);
+
+    XIconifyWindow(g_dpy, gw, DefaultScreen(g_dpy));
+    XFlush(g_dpy);
+    usleep(500000);
+
+    XMapRaised(g_dpy, gw);
     XSync(g_dpy, False);
-    XSetWindowAttributes ora{};
-    ora.override_redirect = on ? 0 : 1;
-    XChangeWindowAttributes(g_dpy, g_win, CWOverrideRedirect, &ora);
-    setWindowType(!on);
+    usleep(300000);
+
+    // Activation, not merely focus: the game re-applies its clip on the former.
+    focusGame(gamePid);
+    usleep(150000);
+    printf("[x11] game restored\n");
+    fflush(stdout);
+}
+
+bool menuAdopt(const char* title) {
+    if (!g_dpy) return false;
+    g_win = findByPid(getpid(), false);
+    if (!g_win) {
+        printf("[menu] could not find the menu window in the tree\n");
+        return false;
+    }
+    if (title) XStoreName(g_dpy, g_win, title);
+    return true;
+}
+
+void menuSetVisible(bool on) {
+    if (!g_dpy || !g_win) return;
+    if (!on) { XUnmapWindow(g_dpy, g_win); XFlush(g_dpy); return; }
+
     XMapRaised(g_dpy, g_win);
     XSync(g_dpy, False);
 
-    setClickThrough(!on);
-
-    // Taking focus is what makes this work: a game holding a pointer grab for
-    // mouse-look keeps every click and every scroll until it loses focus, and
-    // while it holds one no other window can grab the pointer either.
-    // SetInputFocus is a BadMatch on a window that is not viewable yet, and the
-    // remap above has not necessarily been through the window manager by now.
-    auto focusWhenReady = [](::Window w) {
-        if (!w) return;
-        for (int i = 0; i < 40; i++) {
-            XWindowAttributes at{};
-            if (XGetWindowAttributes(g_dpy, w, &at) && at.map_state == IsViewable) {
-                XSetInputFocus(g_dpy, w, RevertToPointerRoot, CurrentTime);
-                return;
-            }
-            usleep(2000);
-        }
-    };
-    if (on) focusWhenReady(g_win);
-    else    focusWhenReady(findByPid(gamePid));
+    // Ask the window manager to activate it, the same request a taskbar makes.
+    // Source indication 2 marks it as coming from a pager so focus-stealing
+    // prevention does not drop it.
+    Atom active = XInternAtom(g_dpy, "_NET_ACTIVE_WINDOW", False);
+    XEvent ev = {};
+    ev.type                 = ClientMessage;
+    ev.xclient.window       = g_win;
+    ev.xclient.message_type = active;
+    ev.xclient.format       = 32;
+    ev.xclient.data.l[0]    = 2;
+    ev.xclient.data.l[1]    = CurrentTime;
+    ev.xclient.data.l[2]    = 0;
+    XSendEvent(g_dpy, DefaultRootWindow(g_dpy), False,
+               SubstructureNotifyMask | SubstructureRedirectMask, &ev);
     XFlush(g_dpy);
-    printf("[x11] %s\n", on ? "menu mode: focusable, clicks land on the menu"
-                            : "overlay mode: click-through, focus back to the game");
 }
 
 bool lmbDown() {

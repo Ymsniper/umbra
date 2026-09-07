@@ -30,11 +30,26 @@ void raise();
 
 void setClickThrough(bool through);
 
-// The overlay runs unmanaged so it never takes focus from the game, which also
-// means the menu cannot be clicked, scrolled or typed into. Menu mode turns it
-// back into an ordinary focusable window for as long as the menu is up; leaving
-// it restores the click-through overlay and hands focus back to the game.
-void setMenuMode(bool on, pid_t gamePid);
+// Used by the MENU process, whose window is an ordinary managed one. Showing it
+// lets the window manager activate it, which is what makes the game release the
+// pointer; hiding it hands activation back the way closing any window does.
+bool menuAdopt(const char* title);
+void menuSetVisible(bool on);
+
+// Hands the game back the keyboard and, more importantly, the pointer. Wine
+// re-applies its cursor clip when its window is ACTIVATED, which is a window
+// manager path that setting the input focus directly does not go through, so
+// without this the cursor stays loose and wanders off the game window.
+void focusGame(pid_t gamePid);
+
+// Minimise the game and bring it straight back. A game confines the cursor
+// through Wine's ClipCursor, which is an X pointer grab; that grab is lost
+// while the tool starts and Wine never notices, because it ignores
+// NotifyGrab/NotifyUngrab. The game re-applies the clip only when it is
+// deactivated and activated again, and asking a window manager to activate the
+// window it already considers active does nothing -- so it takes a real
+// minimise and restore, done here instead of by hand.
+void cycleGameWindow(pid_t gamePid);
 
 // Global input state. The overlay never holds focus, so the game's clicks and
 // keys never reach its event queue; these read the server directly instead.
