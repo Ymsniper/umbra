@@ -485,11 +485,8 @@ inline void drawSettingsPanel() {
         ImGui::Checkbox("Predict moving targets", &g_aimPredict);
         if (g_aimPredict)
             ImGui::SliderFloat("Lead (ms)", &g_aimLeadMs, 0.f, 120.f, "%.0f");
-        // Only meaningful when the aim is on a different button from the shot.
-        // On "Left mouse" or "Either" the trigger IS the aim button, so firing
-        // would release and re-arm in the same instant and do nothing at all.
-        const bool qsUsable = (g_aimButton == 0);
-        if (!qsUsable) ImGui::BeginDisabled();
+        // The curve shapes the path whatever button drives the aim, so it is
+        // not tied to the quick-scope button condition below.
         ImGui::Checkbox("Curved pull", &g_aimCurve);
         ImGui::SameLine(); ImGui::TextDisabled("(arc instead of a straight line)");
         if (g_aimCurve) {
@@ -501,6 +498,13 @@ inline void drawSettingsPanel() {
             ImGui::SameLine(); ImGui::TextDisabled(g_aimCurveAbove ? "" : "(below)");
             ImGui::SliderFloat("Curve jitter (%)", &g_aimCurveJitter, 0.f, 25.f, "%.1f");
         }
+
+        // Quick scope only means something when the aim is on a different
+        // button from the shot. On "Left mouse" or "Either" the trigger IS the
+        // aim button, so firing would release and re-arm in the same instant
+        // and do nothing at all.
+        const bool qsUsable = (g_aimButton == 0);
+        if (!qsUsable) ImGui::BeginDisabled();
         ImGui::Checkbox("Quick scope", &g_aimQuickScope);
         ImGui::SameLine();
         ImGui::TextDisabled(qsUsable ? "(let go the moment you fire)"

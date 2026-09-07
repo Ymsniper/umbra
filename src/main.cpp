@@ -24,7 +24,7 @@
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.1";
+static constexpr const char*    kUmbraVersion = "1.3";
 static constexpr const char*    kProcName   = "Discovery-d.exe";
 static constexpr const char*    kModuleName = "Discovery-d.exe";
 static constexpr int            kWindowW    = 1920;

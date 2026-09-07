@@ -9,7 +9,7 @@ Everything Umbra needs, why it needs it, and how to install it.
 | Component | Needed for | Notes |
 |-----------|-----------|-------|
 | C++17 compiler, CMake ≥ 3.16 | building | GCC or Clang |
-| **raylib 5.0+** | window and drawing | 4.x lacks the separate blend factors the overlay needs |
+| **raylib 5.0+** | window and drawing | built and tested against 6.0 |
 | Dear ImGui + rlImGui | the settings menu | vendored in `third_party/`, nothing to install |
 | libX11 | overlay positioning, hotkeys | |
 | libXext (XShape) | click-through | without it the overlay **blocks your clicks** |
