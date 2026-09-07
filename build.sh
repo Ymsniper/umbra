@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build Umbra. Requires SFML 3, ImGui-SFML and X11 development packages.
+# Build Umbra. Requires raylib 5+, X11 and XShape development packages.
+# ImGui and rlImGui are vendored in third_party/ and need nothing installed.
 #   ./build.sh            configure (if needed) and build
 #   ./build.sh clean      start from a fresh build directory
 set -euo pipefail

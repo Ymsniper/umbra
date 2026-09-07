@@ -10,52 +10,77 @@
 #include "global.hpp"
 #include "skeleton.hpp"
 #include "structs.hpp"
-#include <SFML/Graphics.hpp>
+#include <raylib.h>
+#include <rlgl.h>
 #include <imgui.h>
-#include <imgui-SFML.h>
+#include <rlImGui.h>
 #include <cstdio>
 #include <cmath>
 
 // Colour helpers
-inline sf::Color squadColor(int squadIdx, bool isSelf) {
-    if (isSelf) return sf::Color(0, 255, 120, 255);
-    static const sf::Color palette[] = {
-        sf::Color(255, 60,  60),
-        sf::Color(60,  140, 255),
-        sf::Color(255, 200, 0),
-        sf::Color(200, 60,  255),
-        sf::Color(0,   220, 220),
-        sf::Color(255, 130, 0),
+// Builds a raylib Color from ints, clamped. Everything here computes channels
+// from alphas and ratios, so going through one clamping helper keeps the
+// narrowing conversions in a single place.
+inline Color rgba(int r, int g, int b, int a = 255) {
+    auto c8 = [](int v) -> unsigned char {
+        return (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
     };
-    if (squadIdx < 0) return sf::Color(200, 200, 200);
+    return Color{c8(r), c8(g), c8(b), c8(a)};
+}
+
+inline Color squadColor(int squadIdx, bool isSelf) {
+    if (isSelf) return rgba(0, 255, 120);
+    static const Color palette[] = {
+        rgba(255, 60,  60),
+        rgba(60,  140, 255),
+        rgba(255, 200, 0),
+        rgba(200, 60,  255),
+        rgba(0,   220, 220),
+        rgba(255, 130, 0),
+    };
+    if (squadIdx < 0) return rgba(200, 200, 200);
     return palette[squadIdx % 6];
 }
 
-inline sf::Color healthColor(double hp, double maxHp) {
+inline Color healthColor(double hp, double maxHp) {
     float ratio = (maxHp > 0) ? (float)(hp / maxHp) : 0.f;
     ratio = std::max(0.f, std::min(1.f, ratio));
-    uint8_t r = (uint8_t)(255 * (1.f - ratio));
-    uint8_t g = (uint8_t)(255 * ratio);
-    return sf::Color(r, g, 0, 220);
+    return rgba((int)(255 * (1.f - ratio)), (int)(255 * ratio), 0, 220);
+}
+
+// raylib has no text outline, and unoutlined labels disappear over bright
+// scenery. Ring the glyphs in black first, then draw the text itself.
+inline void drawTextOutlined(const Font& font, const char* s, float x, float y,
+                             float size, Color col) {
+    if (font.texture.id == 0 || !s || !*s) return;
+    const Color edge = rgba(0, 0, 0, col.a);
+    static const float ox[8] = {-1, 1,  0, 0, -1,  1, -1, 1};
+    static const float oy[8] = { 0, 0, -1, 1, -1, -1,  1, 1};
+    for (int i = 0; i < 8; i++)
+        DrawTextEx(font, s, Vector2{x + ox[i], y + oy[i]}, size, 0.f, edge);
+    DrawTextEx(font, s, Vector2{x, y}, size, 0.f, col);
+}
+
+inline void drawTextCentered(const Font& font, const char* s, float cx, float y,
+                             float size, Color col) {
+    if (font.texture.id == 0 || !s || !*s) return;
+    const Vector2 m = MeasureTextEx(font, s, size, 0.f);
+    drawTextOutlined(font, s, cx - m.x * 0.5f, y, size, col);
 }
 
 // Character capsule half-height in UE units. RootComponent sits at the capsule
 // centre, so origin +/- this gives head and feet without needing bone data.
 static constexpr float kCapsuleHalfHeight = 90.f;
-static constexpr float kMinBoxHeight      = 26.f;   // keep far targets readable
-static constexpr float kMinBoxWidth       = 12.f;
 
 // Draw a single entity
-inline void drawEntity(sf::RenderWindow& win, const sf::Font& font,
-                       const EntityData& ent, const FMatrix& vp,
-                       int sw, int sh)
+inline void drawEntity(const Font& font, const EntityData& ent,
+                       const FMatrix& vp, int sw, int sh)
 {
     // Style 2 hides what you cannot shoot; style 1 (default) keeps it on screen
     // but makes the shootable ones unmistakable. Both inert unless the offset
     // has been derived AND the data is currently trustworthy (g_visHave).
     const bool visKnown = (g_visHave && g_visStyle != 0);
     if (g_visStyle == 2 && g_visHave && !ent.visible) return;
-    const bool visHi  = (visKnown && g_visStyle == 1 && ent.visible);
     const bool visDim = (visKnown && g_visStyle == 1 && !ent.visible);
     static const bool eDbg = getenv("ESP_DEBUG") != nullptr;
     static int entDbg = 0;
@@ -72,21 +97,21 @@ inline void drawEntity(sf::RenderWindow& win, const sf::Font& font,
     if (dbg) printf("[draw] drawing ent at root=(%.0f,%.0f) dist=%.0fm\n",
                     sRoot.x, sRoot.y, ent.distance);
 
-    sf::Color col = squadColor(ent.squadIdx, ent.isSelf);
+    const Color col     = squadColor(ent.squadIdx, ent.isSelf);
     const int   masterA = (g_espAlpha < 0) ? 0 : (g_espAlpha > 255 ? 255 : g_espAlpha);
     const float dimF    = ((g_visDimAlpha < 0) ? 0 :
                            (g_visDimAlpha > 255 ? 255 : g_visDimAlpha)) / 255.f;
-    auto withA = [&](sf::Color c, bool faded) {
-        float a = (float)masterA * (faded ? dimF : 1.f);
-        c.a = (std::uint8_t)(a < 0.f ? 0.f : (a > 255.f ? 255.f : a));
-        return c;
+    auto withA = [&](Color c, bool faded) {
+        const float a = (float)masterA * (faded ? dimF : 1.f);
+        return rgba(c.r, c.g, c.b, (int)a);
     };
-    sf::Color colA = withA(col, visDim);
+    const Color colA  = withA(col, visDim);
+    const float thick = std::max(0.5f, g_espThickness);
 
-    // ── the composed rig
+    // the composed rig
     if (g_espSkeleton && ent.hasRig && ent.rig && ent.rigCount > 1) {
         const skel::Rig* rg = static_cast<const skel::Rig*>(ent.rig);
-        sf::Color rigCol = withA(sf::Color(120, 255, 160), visDim);
+        const Color rigCol = withA(rgba(120, 255, 160), visDim);
         static const int kBodyBones[] = { 1,  4,  7,  8,  9, 10, 11, 31, 32,
                                         33, 34, 65, 66, 67, 69, 70, 71 };
         auto isBodyBone = [](int b) {
@@ -107,10 +132,7 @@ inline void drawEntity(sf::RenderWindow& win, const sf::Font& font,
             Vec2 a, b;
             if (!worldToScreen(vp, ent.rigBones[i], a, sw, sh)) continue;
             if (!worldToScreen(vp, ent.rigBones[p], b, sw, sh)) continue;
-            sf::VertexArray line(sf::PrimitiveType::Lines, 2);
-            line[0] = sf::Vertex{sf::Vector2f{a.x, a.y}, rigCol};
-            line[1] = sf::Vertex{sf::Vector2f{b.x, b.y}, rigCol};
-            win.draw(line);
+            DrawLineEx(Vector2{a.x, a.y}, Vector2{b.x, b.y}, thick, rigCol);
         }
     }
 
@@ -157,29 +179,24 @@ inline void drawEntity(sf::RenderWindow& win, const sf::Font& font,
                    head.x, head.y, foot.x, foot.y), fflush(stdout);
 
         if (headOk && footOk) {
-            float h2f   = foot.y - head.y;
-            float width = h2f * 0.40f;   // real head-to-foot span, so a wider ratio fits
-            float cx    = (head.x + foot.x) * 0.5f;
-
-            // Everyone in that trace was 90m+ out, which is a legitimate ~23px
-            // tall box with a 1.5px outline - correct, but effectively invisible.
-            // Clamp to a minimum readable size and thicken the line.
-            if (h2f   < kMinBoxHeight) h2f   = kMinBoxHeight;
-            if (width < kMinBoxWidth)  width = kMinBoxWidth;
+            float h2f = foot.y - head.y;
+            // The floor is off by default: clamping the height flattens the
+            // depth cue, since every target past that range draws the same
+            // size. Width is derived from the clamped height either way, so
+            // the box keeps its proportions.
+            if (g_boxMinPx > 0.f && h2f < g_boxMinPx) h2f = g_boxMinPx;
+            const float width = h2f * 0.40f;   // human aspect over the full span
+            const float cx    = (head.x + foot.x) * 0.5f;
 
             static const bool rDbg = getenv("ESP_DEBUG") != nullptr;
             static int rectDbg = 0;
             if (rDbg && (rectDbg++ % 120) == 0)
                 printf("[rect] pos=(%.0f,%.0f) size=(%.0f,%.0f) col=(%d,%d,%d,%d)\n",
                        cx - width * 0.5f, head.y, width, h2f,
-                       col.r, col.g, col.b, col.a), fflush(stdout);
+                       col.r, col.g, col.b, colA.a), fflush(stdout);
 
-            sf::RectangleShape box(sf::Vector2f(width, h2f));
-            box.setPosition({cx - width * 0.5f, head.y});  // SFML 3: brace-init
-            box.setFillColor(sf::Color::Transparent);
-            box.setOutlineColor(colA);
-            box.setOutlineThickness(2.5f);
-            win.draw(box);
+            DrawRectangleLinesEx(Rectangle{cx - width * 0.5f, head.y, width, h2f},
+                                 thick, colA);
 
             // Behind cover -> cross it out. The box still shows WHERE he is and
             // WHICH squad he is on; the X says you cannot hit him from here.
@@ -188,93 +205,59 @@ inline void drawEntity(sf::RenderWindow& win, const sf::Font& font,
             if (visDim) {
                 const float x0 = cx - width * 0.5f, x1 = cx + width * 0.5f;
                 const float y0 = head.y,            y1 = head.y + h2f;
-                const sf::Color xc = withA(col, false);
-                sf::Vertex xline[4];
-                xline[0].position = sf::Vector2f(x0, y0); xline[0].color = xc;
-                xline[1].position = sf::Vector2f(x1, y1); xline[1].color = xc;
-                xline[2].position = sf::Vector2f(x1, y0); xline[2].color = xc;
-                xline[3].position = sf::Vector2f(x0, y1); xline[3].color = xc;
-                win.draw(xline, 4, sf::PrimitiveType::Lines);
+                const Color xc = withA(col, false);
+                const float xt = std::max(1.f, g_visXThick);
+                DrawLineEx(Vector2{x0, y0}, Vector2{x1, y1}, xt, xc);
+                DrawLineEx(Vector2{x1, y0}, Vector2{x0, y1}, xt, xc);
             }
 
             // Snapline from the bottom centre of the screen. A thin distant box
             // is easy to miss; a line to it is not, and it makes misalignment
             // obvious immediately.
-            if (g_espSnaplines) {
-                sf::Vertex line[2];
-                line[0].position = sf::Vector2f((float)sw * 0.5f, (float)sh);
-                line[0].color    = colA;
-                line[1].position = sf::Vector2f(cx, head.y + h2f);
-                line[1].color    = colA;
-                win.draw(line, 2, sf::PrimitiveType::Lines);
-            }
+            if (g_espSnaplines)
+                DrawLineEx(Vector2{(float)sw * 0.5f, (float)sh},
+                           Vector2{cx, head.y + h2f},
+                           std::max(1.f, thick * 0.6f), colA);
 
             // health bar on the left side
             if (g_espHealth && ent.maxHealth > 0) {
-                float barH  = h2f;
+                const float barH = h2f;
                 float ratio = (float)(ent.health / ent.maxHealth);
                 ratio = std::max(0.f, std::min(1.f, ratio));
+                const float bx = cx - width * 0.5f - 6.f;
 
-                float bx = cx - width * 0.5f - 6.f;
-
-                sf::RectangleShape bg(sf::Vector2f(4.f, barH));
-                bg.setPosition({bx, head.y});               // SFML 3: brace-init
-                bg.setFillColor(sf::Color(40, 40, 40, 180));
-                win.draw(bg);
-
-                sf::RectangleShape fill(sf::Vector2f(4.f, barH * ratio));
-                fill.setPosition({bx, head.y + barH * (1.f - ratio)}); // SFML 3
-                fill.setFillColor(healthColor(ent.health, ent.maxHealth));
-                win.draw(fill);
+                DrawRectangleRec(Rectangle{bx, head.y, 4.f, barH},
+                                 rgba(40, 40, 40, (int)(180 * masterA / 255.f)));
+                DrawRectangleRec(Rectangle{bx, head.y + barH * (1.f - ratio),
+                                           4.f, barH * ratio},
+                                 healthColor(ent.health, ent.maxHealth));
             }
         }
     }
 
-    // ── text labels
+    // text labels
     {
         char buf[128] = {};
-        float ty = sRoot.y - 30.f;
+        const float ts = std::max(6.f, g_espTextSize);
+        float ty = sRoot.y - ts * 2.4f;
 
         if (g_espName && !ent.name.empty()) {
-            // SFML 3: sf::Text constructor takes font; no separate setFont()
-            sf::Text txt(font);
-            txt.setString(ent.name);
-            txt.setCharacterSize(12);
-            txt.setFillColor(col);
-            txt.setOutlineColor(sf::Color::Black);
-            txt.setOutlineThickness(1.f);
-            auto bounds = txt.getLocalBounds();
-            // SFML 3: bounds.width → bounds.size.x; setPosition takes Vector2f
-            txt.setPosition({sRoot.x - bounds.size.x * 0.5f, ty});
-            win.draw(txt);
-            ty += 14.f;
+            drawTextCentered(font, ent.name.c_str(), sRoot.x, ty, ts,
+                             withA(col, visDim));
+            ty += ts + 2.f;
         }
 
         if (g_espHealth) {
             snprintf(buf, sizeof(buf), "%.0f/%.0f HP", ent.health, ent.maxHealth);
-            sf::Text txt(font);                             // SFML 3: font in ctor
-            txt.setString(buf);
-            txt.setCharacterSize(11);
-            txt.setFillColor(healthColor(ent.health, ent.maxHealth));
-            txt.setOutlineColor(sf::Color::Black);
-            txt.setOutlineThickness(1.f);
-            auto bounds = txt.getLocalBounds();
-            txt.setPosition({sRoot.x - bounds.size.x * 0.5f, ty}); // SFML 3
-            win.draw(txt);
-            ty += 13.f;
+            drawTextCentered(font, buf, sRoot.x, ty, ts - 1.f,
+                             withA(healthColor(ent.health, ent.maxHealth), visDim));
+            ty += ts + 1.f;
         }
 
         if (g_espDistance) {
             snprintf(buf, sizeof(buf), "%.0fm", ent.distance);
-            sf::Text txt(font);                             // SFML 3: font in ctor
-            txt.setString(buf);
-            txt.setCharacterSize(10);
-            txt.setFillColor(sf::Color(200, 200, 200, 200));
-            txt.setOutlineColor(sf::Color::Black);
-            txt.setOutlineThickness(1.f);
-            auto bounds = txt.getLocalBounds();
-            txt.setPosition({sRoot.x - bounds.size.x * 0.5f, ty}); // SFML 3
-            win.draw(txt);
+            drawTextCentered(font, buf, sRoot.x, ty, ts - 2.f,
+                             withA(rgba(200, 200, 200), visDim));
         }
     }
 }
@@ -464,9 +447,15 @@ inline void drawSettingsPanel() {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::SliderInt("Opacity",       &g_espAlpha, 30, 255);
+        ImGui::SliderFloat("Line width",  &g_espThickness, 1.f, 6.f, "%.1f px");
+        ImGui::SliderFloat("Text size",   &g_espTextSize, 8.f, 28.f, "%.0f px");
         ImGui::SliderFloat("Max distance", &g_maxEspDist, 50.f, 1000.f, "%.0f m");
         ImGui::SliderFloat("Box headroom", &g_boxHeadroom, 0.f, 0.20f, "%.3f");
         ImGui::SameLine(); ImGui::TextDisabled("(no skeleton only)");
+        ImGui::SliderFloat("Min box height", &g_boxMinPx, 0.f, 60.f, "%.0f px");
+        ImGui::SameLine();
+        ImGui::TextDisabled(g_boxMinPx <= 0.f ? "(off: true scaling)"
+                                              : "(far targets stop shrinking)");
         ImGui::Spacing();
         ImGui::SliderFloat("FOV scale", &g_fovScale, 0.70f, 1.60f, "%.3f");
         ImGui::TextDisabled("game FOV %.1f -> drawn at %.1f",
@@ -530,6 +519,7 @@ inline void drawSettingsPanel() {
         if (g_aimSticky)
             ImGui::SliderFloat("Stickiness", &g_aimStickiness, 1.0f, 3.0f, "%.2f");
         ImGui::SliderFloat("FOV (px)",     &g_aimFovPx, 20.f, 600.f, "%.0f");
+        ImGui::Checkbox("Show FOV circle", &g_aimShowFov);
         ImGui::Checkbox("Scale FOV by distance", &g_aimDistFov);
         ImGui::SliderFloat("Max distance##aim", &g_aimMaxDist, 10.f, 300.f, "%.0f m");
 
@@ -621,6 +611,7 @@ inline void drawSettingsPanel() {
         if (g_visStyle == 1) {
             ImGui::SliderInt("Hidden fade", &g_visDimAlpha, 0, 255);
             ImGui::SameLine(); ImGui::TextDisabled("(x opacity)");
+            ImGui::SliderFloat("X width", &g_visXThick, 1.f, 8.f, "%.1f px");
         }
         ImGui::SliderFloat("Tolerance (s)", &g_visTolerance, 0.02f, 1.0f, "%.3f");
         ImGui::SameLine(); ImGui::TextDisabled("(lower drops cover faster)");
@@ -636,6 +627,8 @@ inline void drawSettingsPanel() {
 
     if (ImGui::BeginTabItem("Status")) {
         ImGui::Text("Entities  %d", g_entityCount);
+        ImGui::SameLine();
+        ImGui::TextDisabled("   %d FPS", GetFPS());
         ImGui::Separator();
         ImGui::TextDisabled("Memory");
         if (g_mem.usingKmod()) {
@@ -680,11 +673,10 @@ inline void drawSettingsPanel() {
 }
 
 // Main render frame
-inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
-                        sf::Clock& imguiClock)
+inline void renderFrame(const Font& font)
 {
-    int sw = (int)win.getSize().x;
-    int sh = (int)win.getSize().y;
+    const int sw = GetScreenWidth();
+    const int sh = GetScreenHeight();
 
     ViewInfo vi;
     {
@@ -692,8 +684,6 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
         vi = g_camView;
     }
     FMatrix vp = buildVPMatrix(vi, sw, sh);
-
-    win.resetGLStates();
 
     {
         std::lock_guard<std::mutex> lk(g_entityMtx);
@@ -718,13 +708,19 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
             fflush(stdout);
         }
         for (int i = 0; i < g_entityCount; i++)
-            drawEntity(win, font, g_entities[i], vp, sw, sh);
+            drawEntity(font, g_entities[i], vp, sw, sh);
     }
 
-    // ── aim assist
+    // aim assist
     const bool aimActive  = g_aimEnabled  && g_aimHeld && !g_aimSuppressed;
     const bool trigActive = g_trigEnabled && g_trigHeld;
     bool trigWantFire = false;
+
+    // Targets inside this ring are the ones the aim will take.
+    if (g_aimShowFov && g_aimEnabled)
+        DrawCircleLinesV(Vector2{sw * 0.5f, sh * 0.5f}, g_aimFovPx,
+                         rgba(255, 255, 255, g_espAlpha / 2));
+
     if ((aimActive || trigActive) && g_vmouse.ready()) {
         std::lock_guard<std::mutex> lk(g_entityMtx);
         const float cx = sw * 0.5f, cy = sh * 0.5f;
@@ -876,14 +872,14 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
                     const float r = ((float)rand() / (float)RAND_MAX) * 2.f - 1.f;
                     return v * (1.f + r * pct * 0.01f);
                 };
-                const float cx = std::max(0.10f, jit(g_aimCurveX, g_aimCurveJitter));
-                const float cy = std::max(0.10f, jit(g_aimCurveY, g_aimCurveJitter));
+                const float ccx = std::max(0.10f, jit(g_aimCurveX, g_aimCurveJitter));
+                const float ccy = std::max(0.10f, jit(g_aimCurveY, g_aimCurveJitter));
                 // Sign follows the direction of travel, so the arc bends the same
                 // way whichever side the target is on, and flips with "above".
                 const float sgn = (g_aimCurveAbove ? -1.f : 1.f)
                                 * ((bestX >= 0.f) ? 1.f : -1.f);
-                pullY = bestY + sgn * (bestX / cx);
-                pullX = bestX + sgn * (bestY / cy);
+                pullY = bestY + sgn * (bestX / ccx);
+                pullX = bestX + sgn * (bestY / ccy);
             }
 
             const float s = g_aimSmooth < 1.f ? 1.f : g_aimSmooth;
@@ -900,7 +896,7 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
             }
         }
 
-        // ── triggerbot decision
+        // triggerbot decision
         if (trigActive && aimActive && found && g_aimLockedIdx >= 0) {
             // COMBINED: the aimbot is pulling toward g_aimLockedIdx. Fire only
             // when the crosshair has actually reached that aim point, within the
@@ -938,11 +934,9 @@ inline void renderFrame(sf::RenderWindow& win, const sf::Font& font,
     // fire (or release) the shot; runs every frame so a held click always ends
     triggerUpdate(trigActive, trigWantFire);
 
-    // SFML 3: ImGui::SFML::Update signature unchanged
-    // ImGui::SFML::Update must still run every frame even when the panel is
-    // hidden - it drives ImGui's internal timing and input state. Only the
-    // panel itself is skipped.
-    ImGui::SFML::Update(win, imguiClock.restart());
+    // rlImGuiBegin must run every frame even when the panel is hidden: it
+    // starts ImGui's frame and feeds it input. Only the panel itself is skipped.
+    rlImGuiBegin();
     if (g_menuVisible.load()) drawSettingsPanel();
-    ImGui::SFML::Render(win);
+    rlImGuiEnd();
 }

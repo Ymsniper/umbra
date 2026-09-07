@@ -78,6 +78,15 @@ inline bool g_espTeammates  = false;  // draw squadmates too (off = enemies only
 inline bool g_espSelf       = false;  // draw a box on yourself
 inline int  g_espAlpha      = 170;    // opacity of boxes and lines (0-255).
 inline float g_boxHeadroom  = 0.07f;
+// Outline width in pixels for boxes, bones and snaplines.
+inline float g_espThickness = 2.0f;
+// Floor on the drawn box height, in pixels. 0 keeps true perspective, so a
+// target twice as far is drawn half as tall. Above 0, every target past that
+// range comes out the same size, which trades the depth cue for legibility.
+inline float g_boxMinPx     = 0.f;
+// Label height in pixels. The font atlas is rasterised once and scaled, so
+// this is free to change at runtime.
+inline float g_espTextSize  = 13.f;
 
 // ── aim assist
 inline bool  g_aimEnabled   = false;  // master toggle (hotkey + menu)
@@ -101,6 +110,9 @@ inline float g_aimStickiness = 1.35f;   // challenger must be this much better
 inline int   g_aimLockedIdx  = -1;      // runtime, not a setting
 
 inline bool  g_aimDistFov    = true;
+// Draw the aim FOV as a ring around the crosshair. The radius is a number in
+// the menu and a guess in play; showing it makes the setting concrete.
+inline bool  g_aimShowFov     = false;
 
 inline int   g_aimSmoothMode = 0;
 inline float g_aimInertia    = 0.40f;
@@ -158,6 +170,7 @@ inline bool   g_aimVisibleOnly = false;  // aimbot: skip players behind cover
 inline bool   g_trigVisibleOnly= false;  // trigger: hold fire on hidden players
 inline int    g_visStyle       = 1;
 inline int    g_visDimAlpha    = 60;      // alpha for players you cannot hit
+inline float  g_visXThick      = 2.5f;    // stroke width of the "behind cover" X
 inline float g_trigSizeScale   = 1.0f;   // 0 = pure pixels, 1 = true part size
 // FLOOR. Size-scaling is right in principle but collapses at range: a head 8 px
 // tall gives 8*0.06 = 0.48 px of tolerance, finer than the projection's own

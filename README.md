@@ -18,9 +18,9 @@ https://github.com/user-attachments/assets/674baa52-3006-4767-a263-29178bed3a31
 
 ## Requirements
 
-* **SFML 3.x**: not 2.x, the old API was removed
-* **ImGui-SFML**, built against SFML 3
+* **raylib 5.0+** for the window and drawing
 * libX11 and libXext, CMake 3.16+, a C++17 compiler
+* Dear ImGui and rlImGui are vendored in `third_party/`; nothing to install
 * **X11 or XWayland.** Pure Wayland will not work: the overlay needs XShape for
   click-through and global hotkey polling, and Wayland deliberately gives an
   external process neither. Any desktop is fine; X11 is the requirement, not
@@ -31,29 +31,29 @@ https://github.com/user-attachments/assets/674baa52-3006-4767-a263-29178bed3a31
 **Arch / CachyOS**
 
 ```bash
-sudo pacman -S --needed base-devel cmake sfml libx11 libxext
-paru -S imgui-sfml
+sudo pacman -S --needed base-devel cmake raylib libx11 libxext
 ```
 
 **Ubuntu 24.04+ / Debian 13+**
 
 ```bash
-sudo apt install build-essential cmake libsfml-dev libx11-dev libxext-dev
-pkg-config --modversion sfml-graphics    # must be 3.x
+sudo apt install build-essential cmake libraylib-dev libx11-dev libxext-dev
+pkg-config --modversion raylib           # must be 5.0 or newer
 ```
 
-ImGui-SFML is not packaged there and has to be built from source.
+Older releases package a raylib too old to build against; build it from source
+if `pkg-config` reports below 5.0.
 
-[REQUIREMENTS.md](REQUIREMENTS.md) covers the rest: building SFML 3 and
-ImGui-SFML from source, kernel headers for the module, Secure Boot,
-`ptrace_scope`, and how to verify a working setup.
+[REQUIREMENTS.md](REQUIREMENTS.md) covers the rest: building raylib from
+source, kernel headers for the module, Secure Boot, `ptrace_scope`, and how to
+verify a working setup.
 
 ### Tested on
 
 ```
 CachyOS                kernel 7.1.2-3-cachyos, built with clang 22.1.6
 KDE Plasma 6.7.2       Wayland session, overlay running through XWayland
-SFML 3.1.0             CMake 4.3.4, GCC 16.1.1
+raylib 6.0             CMake 4.3.4, GCC 16.1.1
 Intel UHD + RTX 4060   game under Proton, Windowed
 ```
 

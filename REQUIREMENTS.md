@@ -9,8 +9,8 @@ Everything Umbra needs, why it needs it, and how to install it.
 | Component | Needed for | Notes |
 |-----------|-----------|-------|
 | C++17 compiler, CMake ≥ 3.16 | building | GCC or Clang |
-| **SFML 3.x** | window and drawing | **not** SFML 2; the 2.x API was removed |
-| **ImGui-SFML** | the settings menu | must be built against SFML 3 |
+| **raylib 5.0+** | window and drawing | 4.x lacks the separate blend factors the overlay needs |
+| Dear ImGui + rlImGui | the settings menu | vendored in `third_party/`, nothing to install |
 | libX11 | overlay positioning, hotkeys | |
 | libXext (XShape) | click-through | without it the overlay **blocks your clicks** |
 | pthreads | reader thread | part of glibc |
@@ -25,70 +25,47 @@ Everything Umbra needs, why it needs it, and how to install it.
 ### Arch, CachyOS, EndeavourOS
 
 ```bash
-sudo pacman -S --needed base-devel cmake sfml libx11 libxext
-```
-
-Arch ships SFML 3 as `sfml`. `imgui-sfml` is in the AUR:
-
-```bash
-paru -S imgui-sfml        # or: yay -S imgui-sfml
+sudo pacman -S --needed base-devel cmake raylib libx11 libxext
 ```
 
 ### Ubuntu 24.04+, Debian 13+
 
 ```bash
-sudo apt install build-essential cmake libsfml-dev libx11-dev libxext-dev
+sudo apt install build-essential cmake libraylib-dev libx11-dev libxext-dev
 ```
 
-Check you actually got SFML 3, because older releases package 2.x:
+Check the version, because older releases package a raylib that is too old:
 
 ```bash
-pkg-config --modversion sfml-graphics     # must start with 3
+pkg-config --modversion raylib            # must be 5.0 or newer
 ```
 
-If it reports 2.x, build SFML 3 from source (below).
-
-ImGui-SFML is not packaged on Debian or Ubuntu; build it from source (below).
+If it reports below 5.0, build raylib from source (below).
 
 ### Fedora
 
 ```bash
-sudo dnf install gcc-c++ cmake SFML-devel libX11-devel libXext-devel
+sudo dnf install gcc-c++ cmake raylib-devel libX11-devel libXext-devel
 ```
 
-Same caveat: confirm SFML is 3.x, and build ImGui-SFML from source.
+Same caveat: confirm raylib is 5.0 or newer.
 
 ---
 
-## Building SFML 3 from source
+## Building raylib from source
 
-Only needed if your distro ships SFML 2.
+Only needed if your distro ships a raylib older than 5.0.
 
 ```bash
-git clone --depth 1 https://github.com/SFML/SFML.git
-cd SFML
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+git clone --depth 1 https://github.com/raysan5/raylib.git
+cd raylib
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
 cmake --build build -j$(nproc)
 sudo cmake --install build
 ```
 
-## Building ImGui-SFML from source
-
-Required on most distros. It must be compiled against the SFML 3 you installed.
-
-```bash
-git clone --depth 1 https://github.com/SFML/imgui-sfml.git
-cd imgui-sfml
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-sudo cmake --install build
-```
-
-If CMake still cannot find it, point the build at it directly:
-
-```bash
-cmake -S . -B build -DIMGUI_SFML_DIR=/path/to/imgui-sfml/install
-```
+The menu needs nothing installed: Dear ImGui and rlImGui are vendored in
+`third_party/` and compiled straight into the binary.
 
 ---
 
@@ -212,8 +189,7 @@ The kernel module is the better answer; it avoids loosening this system-wide.
 
 ```bash
 cmake --version                          # >= 3.16
-pkg-config --modversion sfml-graphics    # 3.x
-ls /usr/lib/libImGui-SFML* 2>/dev/null || echo "ImGui-SFML: build from source"
+pkg-config --modversion raylib           # 5.0 or newer
 ls /lib/modules/$(uname -r)/build        # kernel headers, for the module
 echo "$XDG_SESSION_TYPE"                 # x11, or wayland (then use XWayland)
 ```
