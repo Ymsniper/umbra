@@ -11,35 +11,12 @@
 #include "skeleton.hpp"
 #include "structs.hpp"
 #include <raylib.h>
+#include "colors.hpp"
 #include <rlgl.h>
 #include <cstdio>
 #include <cmath>
 
 // Colour helpers
-// Builds a raylib Color from ints, clamped. Everything here computes channels
-// from alphas and ratios, so going through one clamping helper keeps the
-// narrowing conversions in a single place.
-inline Color rgba(int r, int g, int b, int a = 255) {
-    auto c8 = [](int v) -> unsigned char {
-        return (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
-    };
-    return Color{c8(r), c8(g), c8(b), c8(a)};
-}
-
-inline Color squadColor(int squadIdx, bool isSelf) {
-    if (isSelf) return rgba(0, 255, 120);
-    static const Color palette[] = {
-        rgba(255, 60,  60),
-        rgba(60,  140, 255),
-        rgba(255, 200, 0),
-        rgba(200, 60,  255),
-        rgba(0,   220, 220),
-        rgba(255, 130, 0),
-    };
-    if (squadIdx < 0) return rgba(200, 200, 200);
-    return palette[squadIdx % 6];
-}
-
 inline Color healthColor(double hp, double maxHp) {
     float ratio = (maxHp > 0) ? (float)(hp / maxHp) : 0.f;
     ratio = std::max(0.f, std::min(1.f, ratio));

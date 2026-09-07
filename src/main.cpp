@@ -11,6 +11,7 @@
 #include "settings.hpp"
 #include "x11_overlay.hpp"
 #include "shared.hpp"
+#include "font.hpp"
 
 #include <raylib.h>
 #include <rlgl.h>
@@ -21,14 +22,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// menu.cpp: the settings window, run as a separate process.
+// Each of these runs as its own process, with its own ordinary window.
 int menuMain(SharedState* sh);
+int sonarMain(SharedState* sh);
 
 // Clean shutdown on Ctrl-C
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.3.2";
+static constexpr const char*    kUmbraVersion = "1.4.0";
 static constexpr const char*    kProcName   = "Discovery-d.exe";
 static constexpr const char*    kModuleName = "Discovery-d.exe";
 static constexpr int            kWindowW    = 1920;
@@ -52,32 +54,6 @@ static pid_t parseForcedPID(int argc, char* argv[]) {
         if (p > 0) return p;
     }
     return -1; // not specified - fall back to name search
-}
-
-// Arch first, Debian second, so the common case does not print a load failure
-// for a path that was never going to exist.
-static Font loadOverlayFont() {
-    static const char* kFonts[] = {
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",                    // Arch
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",        // Debian/Ubuntu
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-    };
-    // One atlas at 32 px serves every label size: the text size is a runtime
-    // slider, and a bilinear-filtered atlas scales down cleanly.
-    for (const char* p : kFonts) {
-        if (!FileExists(p)) continue;
-        Font f = LoadFontEx(p, 32, nullptr, 0);
-        if (f.texture.id != 0) {
-            SetTextureFilter(f.texture, TEXTURE_FILTER_BILINEAR);
-            printf("[main] font: %s\n", p);
-            return f;
-        }
-    }
-    printf("[main] WARNING: no DejaVuSans.ttf found; falling back to the\n"
-           "       built-in bitmap font, which is small and blocky.\n");
-    Font f = GetFontDefault();
-    return f;
 }
 
 // Everything the menu shows that is not a setting it can edit itself.
@@ -104,6 +80,35 @@ static void publishStatus(SharedState* sh) {
     st.vmouseKernel    = g_vmouse.usingKernel() ? 1 : 0;
     sh->status = st;
     sh->statusGen.fetch_add(1, std::memory_order_release);
+}
+
+// Enemy positions relative to the local player, plus which way it is facing.
+// Squadmates are deliberately absent: the sonar is for what you cannot see.
+static void publishSonar(SharedState* sh) {
+    SonarFrame f;
+    {
+        std::lock_guard<std::mutex> lk(g_camMtx);
+        f.yaw = (float)g_camView.Rotation.Yaw;
+    }
+    FVector me;
+    {
+        std::lock_guard<std::mutex> lk(g_camMtx);
+        me = g_camView.Location;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_entityMtx);
+        for (int i = 0; i < g_entityCount && f.count < kSharedBlips; i++) {
+            const EntityData& e = g_entities[i];
+            if (!e.valid || e.isSelf || e.isTeammate) continue;
+            SonarBlip& b = f.blips[f.count++];
+            b.dx    = (float)(e.origin.X - me.X);
+            b.dy    = (float)(e.origin.Y - me.Y);
+            b.squad = e.squadIdx;
+            b.cls   = classFromMaxHealth(e.maxHealth);
+        }
+    }
+    sh->sonar = f;
+    sh->sonarGen.fetch_add(1, std::memory_order_release);
 }
 
 int main(int argc, char* argv[]) {
@@ -153,21 +158,24 @@ int main(int argc, char* argv[]) {
     // named object to clean up. Forking before any X or GL call keeps each
     // process's graphics state entirely its own.
     SharedState* shared = sharedCreate();
-    uint32_t settingsGen = 0;
-    pid_t menuPid = -1;
+    SettingsMirror settings;
+    pid_t menuPid = -1, sonarPid = -1;
     if (!shared) {
         printf("[main] shared mapping failed; running without the menu\n");
     } else {
         shared->gamePid = (int32_t)g_mem.pid;
         sharedWriteFields(shared);
-        settingsGen = shared->settingsGen.load();
+        settings.gen = shared->settingsGen.load();
+        mirrorCapture(settings);
         menuPid = fork();
-        if (menuPid == 0) {
-            _exit(menuMain(shared));
-        }
-        if (menuPid < 0) {
+        if (menuPid == 0) _exit(menuMain(shared));
+        if (menuPid < 0)
             printf("[main] could not start the menu process (%s)\n", strerror(errno));
-        }
+
+        sonarPid = fork();
+        if (sonarPid == 0) _exit(sonarMain(shared));
+        if (sonarPid < 0)
+            printf("[main] could not start the sonar process (%s)\n", strerror(errno));
     }
 
     // Virtual pointer for aim assist. A SEPARATE device, so the real mouse keeps
@@ -228,7 +236,7 @@ int main(int argc, char* argv[]) {
                               RL_FUNC_ADD, RL_FUNC_ADD);
 
     // 3. Font
-    Font font = loadOverlayFont();
+    Font font = loadUiFont();
 
     // 4. Start reader thread
     std::thread reader(readerThread, GWorld);
@@ -323,10 +331,10 @@ int main(int argc, char* argv[]) {
         }
 
         if (shared) {
-            // A setting the menu changed, or one HOME changed here.
-            sharedPull(shared, settingsGen);
-            sharedPushIfChanged(shared, settingsGen);
+            // Takes what the menu changed, publishes what HOME changed here.
+            sharedSync(shared, settings);
             publishStatus(shared);
+            if (g_sonarEnabled) publishSonar(shared);
         }
 
         BeginDrawing();
@@ -343,19 +351,22 @@ int main(int argc, char* argv[]) {
     g_running = false;
     if (reader.joinable()) reader.join();
     if (shared) {
-        if (menuPid > 0) {
-            // Let it publish any last edit and go. Never an unbounded wait: a
-            // menu that does not answer must not keep the overlay alive.
-            kill(menuPid, SIGTERM);
+        // Let each publish any last edit and go. Never an unbounded wait: a
+        // child that does not answer must not keep the overlay alive.
+        const pid_t children[2] = { menuPid, sonarPid };
+        for (pid_t child : children) {
+            if (child <= 0) continue;
+            kill(child, SIGTERM);
             bool reaped = false;
             for (int i = 0; i < 200 && !reaped; i++) {
-                if (waitpid(menuPid, nullptr, WNOHANG) == menuPid) reaped = true;
+                if (waitpid(child, nullptr, WNOHANG) == child) reaped = true;
                 else usleep(5000);
             }
-            if (!reaped) { kill(menuPid, SIGKILL); waitpid(menuPid, nullptr, 0); }
+            if (!reaped) { kill(child, SIGKILL); waitpid(child, nullptr, 0); }
         }
-        // The menu's settings live in the mapping, so they survive it exiting.
-        sharedPull(shared, settingsGen);
+        // The children's settings live in the mapping, so they survive them
+        // exiting; take the final state before it is written to disk.
+        sharedReadFields(shared);
     }
     saveSettings();          // come back next launch the way the user left it
     if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);

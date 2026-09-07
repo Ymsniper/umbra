@@ -384,23 +384,24 @@ void cycleGameWindow(pid_t gamePid) {
     fflush(stdout);
 }
 
-bool menuAdopt(const char* title) {
+bool adoptSelf(const char* title) {
     if (!g_dpy) return false;
     g_win = findByPid(getpid(), false);
     if (!g_win) {
-        printf("[menu] could not find the menu window in the tree\n");
+        printf("[x11] could not find this process's own window in the tree\n");
         return false;
     }
     if (title) XStoreName(g_dpy, g_win, title);
     return true;
 }
 
-void menuSetVisible(bool on) {
+void setVisible(bool on, bool activate) {
     if (!g_dpy || !g_win) return;
     if (!on) { XUnmapWindow(g_dpy, g_win); XFlush(g_dpy); return; }
 
     XMapRaised(g_dpy, g_win);
     XSync(g_dpy, False);
+    if (!activate) { XFlush(g_dpy); return; }
 
     // Ask the window manager to activate it, the same request a taskbar makes.
     // Source indication 2 marks it as coming from a pager so focus-stealing
@@ -417,6 +418,71 @@ void menuSetVisible(bool on) {
     XSendEvent(g_dpy, DefaultRootWindow(g_dpy), False,
                SubstructureNotifyMask | SubstructureRedirectMask, &ev);
     XFlush(g_dpy);
+}
+
+void setNoFocusSteal() {
+    if (!g_dpy || !g_win) return;
+    Atom userTime = XInternAtom(g_dpy, "_NET_WM_USER_TIME", False);
+    unsigned long zero = 0;
+    XChangeProperty(g_dpy, g_win, userTime, XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char*)&zero, 1);
+    XFlush(g_dpy);
+}
+
+void setAlwaysOnTop() {
+    if (!g_dpy || !g_win) return;
+    Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
+    Atom above   = XInternAtom(g_dpy, "_NET_WM_STATE_ABOVE", False);
+    Atom skipTb  = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+    Atom skipPg  = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+    Atom states[3] = { above, skipTb, skipPg };
+    XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char*)states, 3);
+    XFlush(g_dpy);
+}
+
+void moveResizeManaged(int x, int y, int w, int h) {
+    if (!g_dpy || !g_win) return;
+    Atom mr = XInternAtom(g_dpy, "_NET_MOVERESIZE_WINDOW", False);
+
+    // Bits 8..11 say x, y, width and height are all supplied; bits 12..13 mark
+    // the request as coming from a pager, which is not second-guessed.
+    const long flags = (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11) | (2L << 12);
+    XEvent ev = {};
+    ev.type                 = ClientMessage;
+    ev.xclient.window       = g_win;
+    ev.xclient.message_type = mr;
+    ev.xclient.format       = 32;
+    ev.xclient.data.l[0]    = flags;
+    ev.xclient.data.l[1]    = x;
+    ev.xclient.data.l[2]    = y;
+    ev.xclient.data.l[3]    = w;
+    ev.xclient.data.l[4]    = h;
+    XSendEvent(g_dpy, DefaultRootWindow(g_dpy), False,
+               SubstructureNotifyMask | SubstructureRedirectMask, &ev);
+    XFlush(g_dpy);
+}
+
+void setSizeHints(int x, int y, int w, int h) {
+    if (!g_dpy || !g_win) return;
+    XSizeHints hints{};
+    hints.flags  = USPosition | USSize | PPosition | PSize;
+    hints.x      = x;  hints.y      = y;
+    hints.width  = w;  hints.height = h;
+    XSetWMNormalHints(g_dpy, g_win, &hints);
+    XFlush(g_dpy);
+}
+
+bool selfRect(int& x, int& y, int& w, int& h) {
+    if (!g_dpy || !g_win) return false;
+    XWindowAttributes at{};
+    if (!XGetWindowAttributes(g_dpy, g_win, &at)) return false;
+    ::Window child = 0;
+    if (!XTranslateCoordinates(g_dpy, g_win, DefaultRootWindow(g_dpy),
+                               0, 0, &x, &y, &child)) return false;
+    w = at.width;
+    h = at.height;
+    return true;
 }
 
 bool lmbDown() {

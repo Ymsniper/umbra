@@ -245,6 +245,38 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::EndTabItem();
     }
 
+    if (ImGui::BeginTabItem("Sonar")) {
+        ImGui::Checkbox("Enabled##sonar", &g_sonarEnabled);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(its own window, put it anywhere)");
+        if (!g_sonarEnabled) ImGui::BeginDisabled();
+
+        ImGui::SliderFloat("Range", &g_sonarRange, 10.f, 250.f, "%.0f m");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(centre to rim)");
+        ImGui::SliderInt("Opacity##sonar", &g_sonarAlpha, 30, 255);
+
+        ImGui::Separator();
+        ImGui::Checkbox("Class letters", &g_sonarLetters);
+        ImGui::SameLine();
+        ImGui::TextDisabled(g_sonarLetters ? "(L / M / H)" : "(plain dots)");
+        ImGui::Checkbox("Range rings", &g_sonarRings);
+
+        ImGui::Separator();
+        ImGui::Checkbox("Lock in place", &g_sonarLock);
+        ImGui::SameLine();
+        ImGui::TextDisabled(g_sonarLock ? "(mouse ignored)"
+                                        : "(drag to move, corner to resize)");
+        ImGui::TextDisabled("%.0f,%.0f  %.0fx%.0f",
+                            g_sonarX, g_sonarY, g_sonarW, g_sonarH);
+
+        ImGui::Separator();
+        ImGui::TextDisabled("It turns with you: up is where you are facing.");
+        ImGui::TextDisabled("Squad colours match the ESP. Squadmates are not shown.");
+        if (!g_sonarEnabled) ImGui::EndDisabled();
+        ImGui::EndTabItem();
+    }
+
     if (ImGui::BeginTabItem("Status")) {
         ImGui::Text("Entities  %d", st.entityCount);
         ImGui::SameLine();
@@ -306,8 +338,10 @@ int menuMain(SharedState* sh) {
     signal(SIGINT,  menuSignal);
     signal(SIGTERM, menuSignal);
 
-    uint32_t seenGen = sh->settingsGen.load();
+    SettingsMirror settings;
+    settings.gen = sh->settingsGen.load();
     sharedReadFields(sh);
+    mirrorCapture(settings);
 
     const int w = (int)(g_menuW > 200.f ? g_menuW : 380.f);
     const int h = (int)(g_menuH > 200.f ? g_menuH : 460.f);
@@ -336,7 +370,7 @@ int menuMain(SharedState* sh) {
                               RL_FUNC_ADD, RL_FUNC_ADD);
 
     if (!ovl::init()) { printf("[menu] no X display; menu unavailable\n"); return 1; }
-    ovl::menuAdopt("Umbra");
+    ovl::adoptSelf("Umbra");
 
     // Never mapped yet, so nothing has been activated. It stays that way until
     // INSERT asks for it.
@@ -353,14 +387,14 @@ int menuMain(SharedState* sh) {
         // tool; End and Ctrl-C are how the tool is quit.
         if (WindowShouldClose() && visible) {
             visible = false;
-            ovl::menuSetVisible(false);
+            ovl::setVisible(false, false);
             ovl::focusGame(sh->gamePid);
         }
 
         const bool nowInsert = ovl::keyDown(ovl::KeyInsert);
         if (nowInsert && !prevInsert) {
             visible = !visible;
-            ovl::menuSetVisible(visible);
+            ovl::setVisible(visible, true);
             sh->menuVisible.store(visible ? 1 : 0);
             printf("[menu] %s\n", visible ? "shown" : "hidden");
             fflush(stdout);
@@ -370,13 +404,15 @@ int menuMain(SharedState* sh) {
         }
         prevInsert = nowInsert;
 
+        // Synced even while hidden, so a change made elsewhere is never missed.
+        sharedSync(sh, settings);
+
         if (!visible) {
             // Nothing to draw, and no window to draw into. Idle cheaply.
             WaitTime(0.03);
             continue;
         }
 
-        sharedPull(sh, seenGen);
         Status st = sh->status;
 
         BeginDrawing();
@@ -390,12 +426,11 @@ int menuMain(SharedState* sh) {
 
         g_menuW = (float)GetScreenWidth();
         g_menuH = (float)GetScreenHeight();
-        sharedPushIfChanged(sh, seenGen);
     }
 
     // Publish before leaving, so an edit made in the last frame is not lost.
-    sharedPushIfChanged(sh, seenGen);
-    ovl::menuSetVisible(false);
+    sharedSync(sh, settings);
+    ovl::setVisible(false, false);
     ovl::focusGame(sh->gamePid);
     ovl::shutdown();
     rlImGuiShutdown();

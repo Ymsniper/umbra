@@ -179,6 +179,17 @@ inline float g_trigMinTol      = 2.0f;
 inline float g_trigOnTargetTol = 0.f;    // runtime: the tolerance used this frame
 inline float g_trigOnTargetPx  = 0.f;    // runtime: measured offset this frame
 
+// ── sonar: a live top-down view of where the enemies are, in a window of its
+// own so it can sit anywhere, including on a second screen.
+inline bool  g_sonarEnabled = false;
+inline float g_sonarRange   = 60.f;    // metres from the centre to the rim
+inline int   g_sonarAlpha   = 200;     // opacity of the whole window
+inline bool  g_sonarLetters = true;    // H/M/L rather than plain dots
+inline bool  g_sonarRings   = true;    // range rings and the cross
+inline bool  g_sonarLock    = false;   // stop the mouse moving or resizing it
+inline float g_sonarX = 60.f, g_sonarY = 60.f;
+inline float g_sonarW = 260.f, g_sonarH = 260.f;
+
 // ── menu window (size and opacity, both persisted)
 inline int   g_menuAlpha = 225;   // background opacity of the settings window
 inline float g_menuW = 300.f;

@@ -22,8 +22,38 @@
 #include <cstring>
 #include <sys/mman.h>
 
-inline constexpr uint32_t kSharedMagic  = 0x554D4252;   // 'UMBR'
-inline constexpr int      kSharedFields = 128;
+inline constexpr uint32_t kSharedMagic   = 0x554D4252;   // 'UMBR'
+inline constexpr int      kSharedFields  = 128;
+inline constexpr int      kSharedBlips   = 64;
+
+// One enemy on the sonar. The offset is in world units from the local player,
+// unrotated: the sonar turns it into screen space itself, so the reader does
+// not have to know how the sonar is oriented or scaled.
+struct SonarBlip {
+    float   dx = 0.f, dy = 0.f;
+    int32_t squad = -1;
+    uint8_t cls   = 3;       // 0 light, 1 medium, 2 heavy, 3 unknown
+};
+
+struct SonarFrame {
+    float   yaw   = 0.f;     // where the local player is facing, degrees
+    int32_t count = 0;
+    SonarBlip blips[kSharedBlips];
+};
+
+// Light 150, Medium 250, Heavy 350. Nearest wins, so a health buff or a class
+// that is not one of the three still lands on something sensible.
+inline uint8_t classFromMaxHealth(double maxHp) {
+    if (maxHp < 50.0) return 3;
+    const double table[3] = { 150.0, 250.0, 350.0 };
+    uint8_t best = 3;
+    double bestErr = 1e18;
+    for (uint8_t i = 0; i < 3; i++) {
+        const double err = maxHp > table[i] ? maxHp - table[i] : table[i] - maxHp;
+        if (err < bestErr) { bestErr = err; best = i; }
+    }
+    return best;
+}
 
 // Everything the menu shows that is not itself a setting.
 struct Status {
@@ -64,6 +94,10 @@ struct SharedState {
     std::atomic<uint32_t> statusGen;
     Status status;
 
+    // Written by the overlay, read by the sonar.
+    std::atomic<uint32_t> sonarGen;
+    SonarFrame sonar;
+
     std::atomic<uint8_t> menuVisible;
 };
 
@@ -79,6 +113,7 @@ inline SharedState* sharedCreate() {
     sh->gamePid    = 0;
     sh->settingsGen.store(0);
     sh->statusGen.store(0);
+    sh->sonarGen.store(0);
     sh->menuVisible.store(0);
     return sh;
 }
@@ -114,31 +149,61 @@ inline void sharedReadFields(const SharedState* sh) {
     }
 }
 
-// True when the mapping holds settings this process has not applied yet.
-inline bool sharedPull(SharedState* sh, uint32_t& seenGen) {
-    const uint32_t gen = sh->settingsGen.load(std::memory_order_acquire);
-    if (gen == seenGen) return false;
-    sharedReadFields(sh);
-    seenGen = gen;
-    return true;
+inline SharedState::Field fieldOf(const SettingRef& ref) {
+    SharedState::Field f{};
+    switch (ref.kind) {
+        case SettingRef::BOOL:  f.kind = 0; f.i = *(bool*) ref.p ? 1 : 0; break;
+        case SettingRef::INT:   f.kind = 1; f.i = *(int*)  ref.p;         break;
+        case SettingRef::FLOAT: f.kind = 2; f.f = *(float*)ref.p;         break;
+    }
+    return f;
 }
 
-// Publishes this process's settings if any of them differ from the mapping.
-inline bool sharedPushIfChanged(SharedState* sh, uint32_t& seenGen) {
+inline bool fieldSame(const SharedState::Field& a, const SharedState::Field& b) {
+    return a.kind == b.kind && a.i == b.i && a.f == b.f;
+}
+
+// What this process last agreed the settings were. Publishing the whole set on
+// every frame would mean the busiest process constantly overwrote edits made in
+// another one; comparing against this says which fields THIS process changed,
+// so each side publishes only its own and the rest merge.
+struct SettingsMirror {
+    uint32_t gen = 0;
+    uint32_t count = 0;
+    SharedState::Field snap[kSharedFields];
+};
+
+inline void mirrorCapture(SettingsMirror& m) {
     uint32_t n = 0;
-    bool changed = false;
     for (auto& kv : settingFields()) {
         if (n >= kSharedFields) break;
-        const SharedState::Field& f = sh->fields[n++];
-        switch (kv.second.kind) {
-            case SettingRef::BOOL:  changed |= ((*(bool*) kv.second.p ? 1 : 0) != f.i); break;
-            case SettingRef::INT:   changed |= (*(int*)   kv.second.p != f.i);          break;
-            case SettingRef::FLOAT: changed |= (*(float*) kv.second.p != f.f);          break;
-        }
-        if (changed) break;
+        m.snap[n] = fieldOf(kv.second);
+        n++;
     }
-    if (!changed) return false;
-    sharedWriteFields(sh);
-    seenGen = sh->settingsGen.fetch_add(1, std::memory_order_release) + 1;
-    return true;
+    m.count = n;
+}
+
+// Take anything newer from the mapping, then publish whatever changed here.
+inline void sharedSync(SharedState* sh, SettingsMirror& m) {
+    const uint32_t gen = sh->settingsGen.load(std::memory_order_acquire);
+    if (gen != m.gen) {
+        sharedReadFields(sh);
+        m.gen = gen;
+        mirrorCapture(m);
+    }
+
+    uint32_t n = 0;
+    bool published = false;
+    for (auto& kv : settingFields()) {
+        if (n >= kSharedFields) break;
+        const SharedState::Field cur = fieldOf(kv.second);
+        if (!fieldSame(cur, m.snap[n])) {
+            sh->fields[n] = cur;
+            m.snap[n]     = cur;
+            published     = true;
+        }
+        n++;
+    }
+    if (published)
+        m.gen = sh->settingsGen.fetch_add(1, std::memory_order_release) + 1;
 }
