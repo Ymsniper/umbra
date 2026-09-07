@@ -504,8 +504,9 @@ inline void drawSettingsPanel() {
         ImGui::Checkbox("Curved pull", &g_aimCurve);
         ImGui::SameLine(); ImGui::TextDisabled("(arc instead of a straight line)");
         if (g_aimCurve) {
-            ImGui::SliderFloat("Curve lateral", &g_aimCurveX, 0.5f, 20.f, "%.2f");
-            ImGui::SliderFloat("Curve vertical", &g_aimCurveY, 0.5f, 20.f, "%.2f");
+            ImGui::SliderFloat("Bow: sideways -> up/down", &g_aimCurveX, 0.5f, 20.f, "%.2f");
+            ImGui::SameLine(); ImGui::TextDisabled("(lower = wider)");
+            ImGui::SliderFloat("Bow: up/down -> sideways", &g_aimCurveY, 0.5f, 20.f, "%.2f");
             ImGui::SameLine(); ImGui::TextDisabled("(lower = wider)");
             ImGui::Checkbox("Arc above", &g_aimCurveAbove);
             ImGui::SameLine(); ImGui::TextDisabled(g_aimCurveAbove ? "" : "(below)");

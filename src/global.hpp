@@ -132,8 +132,10 @@ inline float g_aimLeadMs    = 35.f;    // ms of lead; ~ reader + present latency
 // EuroSec 2020. Orthogonal to the smoothing: this sets the SHAPE of the path,
 // smoothing still sets the RATE, so it layers over either mode.
 inline bool  g_aimCurve       = false;
-inline float g_aimCurveX      = 1.30f;   // lateral divisor; smaller = wider arc
-inline float g_aimCurveY      = 3.90f;   // vertical divisor
+// Each divisor rotates one axis of the delta into the OTHER axis, so the name
+// of the axis it is scaled from is not the axis it deflects. Smaller = wider.
+inline float g_aimCurveX      = 1.30f;   // sideways travel bows the path up/down
+inline float g_aimCurveY      = 3.90f;   // up/down travel bows it sideways
 inline bool  g_aimCurveAbove  = true;    // arc above the straight line, or below
 inline float g_aimCurveJitter = 1.0f;    // per-frame variation, percent
 
