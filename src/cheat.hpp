@@ -17,7 +17,10 @@
 #include <cmath>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <thread>
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #include <vector>
 #include <string>
@@ -146,18 +149,20 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
 
     // Collision capsule first - it is the game's own per-class height and needs
     // no bone data at all.
-    uintptr_t cap = mem.readPtr(pawn + g_off.ACharacter_CapsuleComponent);
+    uintptr_t cap = (g_off.ACharacter_CapsuleComponent && g_off.Capsule_HalfHeight)
+                  ? mem.readPtr(pawn + g_off.ACharacter_CapsuleComponent) : 0;
     if (cap) {
         float hh = mem.read<float>(cap + g_off.Capsule_HalfHeight);
         if (hh > 20.f && hh < 300.f) ent.capsuleHalf = hh;   // sane range only
     }
 
     // The game's own eye height for this pawn. Reflected, replicated, and exact.
-    {
+    if (g_off.APawn_BaseEyeHeight) {
         const float eh = mem.read<float>(pawn + g_off.APawn_BaseEyeHeight);
         if (std::isfinite(eh) && eh > 10.f && eh < 200.f) ent.eyeHeight = eh;
     }
 
+    if (!g_off.APawn_Mesh) return;
     uintptr_t mesh = mem.readPtr(pawn + g_off.APawn_Mesh);
     if (!mesh) return;
 
@@ -174,6 +179,7 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
         if (s_lrt.size() > 256) s_lrt.clear();
     }
 
+    if (!g_off.Mesh_BoneArray || !g_off.Mesh_ComponentToWorld) return;
     uintptr_t data = mem.readPtr(mesh + g_off.Mesh_BoneArray);
     int32_t   num  = mem.read<int32_t>(mesh + g_off.Mesh_BoneArray + 8);
     if (!data || num < 8 || num > 512) return;
@@ -289,21 +295,40 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
 }
 
 // the chain died at `self=0x0`.
+// smaps rather than maps, because smaps says how much of each mapping holds
+// memory. Most of the game's writable address space is reserved and never
+// touched, hundreds of GB after a long session, and a sweep reads that as
+// zeros at the full cost of reading. A mapping with nothing resident and
+// nothing swapped out has nothing in it to find.
 inline std::vector<MemRegion> heapRegionsFor(const Mem& mem) {
     std::vector<MemRegion> out;
     char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/maps", mem.pid);
+    snprintf(path, sizeof(path), "/proc/%d/smaps", mem.pid);
     std::ifstream f(path);
     std::string line;
-    while (std::getline(f, line)) {
-        if (line.find("rw") == std::string::npos) continue;
-        uintptr_t b = strtoull(line.c_str(), nullptr, 16);
-        auto dash = line.find('-');
-        uintptr_t e = strtoull(line.c_str() + dash + 1, nullptr, 16);
-        if (e <= b || (e - b) < 0x10000) continue;
-        if (b >= mem.modbase && e <= mem.modend) continue;
+    uintptr_t b = 0, e = 0;
+    bool writable = false;
+    size_t kb = 0;
+    auto flush = [&]() {
+        if (e <= b || !writable || (e - b) < 0x10000 || kb == 0) return;
+        if (b >= mem.modbase && e <= mem.modend) return;
         out.push_back({b, e - b});
+    };
+    while (std::getline(f, line)) {
+        const size_t sp = line.find(' ');
+        const std::string head = line.substr(0, sp);
+        if (head.find('-') != std::string::npos && head.find(':') == std::string::npos) {
+            flush();
+            b = strtoull(head.c_str(), nullptr, 16);
+            e = strtoull(head.c_str() + head.find('-') + 1, nullptr, 16);
+            writable = sp != std::string::npos && line.size() > sp + 2 &&
+                       line[sp + 1] == 'r' && line[sp + 2] == 'w';
+            kb = 0;
+        } else if (head == "Rss:" || head == "Swap:") {
+            kb += strtoull(line.c_str() + head.size(), nullptr, 10);
+        }
     }
+    flush();
     return out;
 }
 
@@ -344,6 +369,32 @@ inline bool validateGameState(const Mem& mem, uintptr_t gs) {
     if (!g_off.VT_APlayerState && common > mem.modbase && common < mem.modend)
         g_off.VT_APlayerState = common - mem.modbase;     // derived, not assumed
     return true;
+}
+
+// Our pawn's anim state updater keeps the GameState it animates against, so
+// the live GameState is two reads from the pawn: no sweep, and never a
+// GameState that an earlier match left behind in the heap. `known` has already
+// been validated, so finding it again costs nothing more than the reads.
+inline uintptr_t gameStateOfPawn(const Mem& mem, uintptr_t pawn, uintptr_t known = 0) {
+    if (!pawn || (pawn & 7) || !g_off.ADiscoveryCharacter_AnimSU || !g_off.AnimSU_GameState)
+        return 0;
+    const uintptr_t asu = mem.readPtr(pawn + g_off.ADiscoveryCharacter_AnimSU);
+    if (!asu || (asu & 7) || !mem.vtableInModule(mem.readPtr(asu))) return 0;
+    const uintptr_t gs = mem.readPtr(asu + g_off.AnimSU_GameState);
+    if (!gs || (gs & 7) || !mem.vtableInModule(mem.readPtr(gs))) return 0;
+    if (gs == known) return gs;
+    return validateGameState(mem, gs) ? gs : 0;
+}
+
+inline bool playerListHas(const Mem& mem, uintptr_t gs, uintptr_t ps) {
+    const uintptr_t data = mem.readPtr(gs + g_off.AGameStateBase_PlayerArray
+                                          + offsets::TArray_Data);
+    const int32_t num = mem.read<int32_t>(gs + g_off.AGameStateBase_PlayerArray
+                                             + offsets::TArray_Num);
+    if (!data || num <= 0 || num > 128) return false;
+    std::vector<uintptr_t> v((size_t)num);
+    if (!mem.read_raw(data, v.data(), v.size() * sizeof(uintptr_t))) return false;
+    return std::find(v.begin(), v.end(), ps) != v.end();
 }
 
 inline uintptr_t pickGameStateByClock(const Mem& mem,
@@ -398,6 +449,38 @@ inline bool rollIsLevel(double r) {
     return a <= 1.0 || a >= 359.0;
 }
 
+// The camera manager is the object holding our controller at PCOwner, but it
+// is not the only object that does, and projecting through one of the others
+// puts every box off screen while the sonar, which needs no camera, still
+// works. The camera class settles it. Without a class match, a POV that
+// describes a real view near our own pawn is the next best evidence, and an
+// object with neither is not a camera.
+enum class CamFit { None, View, Class };
+inline CamFit cameraIsOurs(const Mem& mem, uintptr_t cam, uintptr_t pawn) {
+    if (g_off.VT_APlayerCameraManager &&
+        mem.readPtr(cam) == mem.modbase + g_off.VT_APlayerCameraManager)
+        return CamFit::Class;
+    if (!g_off.APlayerCameraManager_POVLoc) return CamFit::None;
+    const uintptr_t pov = cam + g_off.APlayerCameraManager_POVLoc;
+    const float    f = mem.read<float>(pov + povFovOff());
+    const FRotator r = mem.read<FRotator>(pov + povRotOff());
+    const FVector  L = mem.read<FVector>(pov);
+    if (!(f > 1.f && f < 170.f)) return CamFit::None;
+    if (!std::isfinite(r.Yaw) || std::fabs(r.Yaw) > 361.0) return CamFit::None;
+    if (!pitchLooksHuman(r.Pitch) || !std::isfinite(r.Roll)) return CamFit::None;
+    double roll = std::fmod(r.Roll, 360.0);
+    if (roll < 0) roll += 360.0;
+    if (roll > 5.0 && roll < 355.0) return CamFit::None;    // shake, not a tilt
+    if (!std::isfinite(L.X) || !std::isfinite(L.Y) || !std::isfinite(L.Z) || L.isZero())
+        return CamFit::None;
+    uintptr_t root = pawn ? mem.readPtr(pawn + g_off.AActor_RootComponent) : 0;
+    if (root && !(root & 7)) {
+        const FVector me = mem.read<FVector>(root + g_off.USceneComponent_RelLocation);
+        if (!me.isZero() && L.dist(me) > 5000.0) return CamFit::None;
+    }
+    return CamFit::View;
+}
+
 inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
     if (!g_off.GObjects_RVA) return 0;
     GObjectsView g = godirect::resolve(mem);
@@ -416,14 +499,18 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
 
     auto looksReal = [&](uintptr_t ctrl, uintptr_t pawn) -> bool {
         // a controller owns a PlayerState
-        uintptr_t ps = mem.readPtr(ctrl + g_off.AController_PlayerState);
-        if (!ps || (ps & 7) || !mem.vtableInModule(mem.readPtr(ps))) return false;
+        if (g_off.AController_PlayerState) {
+            uintptr_t ps = mem.readPtr(ctrl + g_off.AController_PlayerState);
+            if (!ps || (ps & 7) || !mem.vtableInModule(mem.readPtr(ps))) return false;
+        }
         // and a rotation a human could be looking along -- upright means roll 0
-        FRotator r = mem.read<FRotator>(ctrl + g_off.AController_ControlRotation);
-        if (!std::isfinite(r.Pitch) || !std::isfinite(r.Yaw) || !std::isfinite(r.Roll))
-            return false;
-        if (!pitchLooksHuman(r.Pitch) || !rollIsLevel(r.Roll)) return false;
-        if (!std::isfinite(r.Yaw) || std::fabs(r.Yaw) > 361.0) return false;
+        if (g_off.AController_ControlRotation) {
+            FRotator r = mem.read<FRotator>(ctrl + g_off.AController_ControlRotation);
+            if (!std::isfinite(r.Pitch) || !std::isfinite(r.Yaw) || !std::isfinite(r.Roll))
+                return false;
+            if (!pitchLooksHuman(r.Pitch) || !rollIsLevel(r.Roll)) return false;
+            if (!std::isfinite(r.Yaw) || std::fabs(r.Yaw) > 361.0) return false;
+        }
         // the pawn stands somewhere in the world
         uintptr_t root = mem.readPtr(pawn + g_off.AActor_RootComponent);
         if (!root || (root & 7) || !mem.vtableInModule(mem.readPtr(root))) return false;
@@ -483,9 +570,10 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
         };
         learnVt("VT_APlayerController", o, &g_off.VT_APlayerController);
         learnVt("VT_APawn", pawn, &g_off.VT_APawn);
-        learnVt("VT_APlayerState",
-                mem.readPtr(o + g_off.AController_PlayerState),
-                &g_off.VT_APlayerState);
+        if (g_off.AController_PlayerState)
+            learnVt("VT_APlayerState",
+                    mem.readPtr(o + g_off.AController_PlayerState),
+                    &g_off.VT_APlayerState);
 
         if (g_off.APlayerCameraManager_PCOwner) {
             uintptr_t found = 0;
@@ -494,8 +582,9 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
                 if (!c || (c & 7) || c < 0x10000) continue;
                 if (!mem.vtableInModule(mem.readPtr(c))) continue;
                 if (mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) != o) continue;
-                found = c;
-                break;
+                const CamFit fit = cameraIsOurs(mem, c, pawn);
+                if (fit == CamFit::Class) { found = c; break; }
+                if (fit == CamFit::View && !found) found = c;
             }
             if (found) {
                 if (found != g_cameraMgr) {
@@ -546,10 +635,13 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
             if (asu && mem.vtableInModule(mem.readPtr(asu))) {
                 uintptr_t gs = mem.readPtr(asu + g_off.AnimSU_GameState);
                 if (gs && mem.vtableInModule(mem.readPtr(gs))) {
-                    double clock = mem.read<double>(gs + g_off.AGameStateBase_WorldTime);
+                    double clock = g_off.AGameStateBase_WorldTime
+                                 ? mem.read<double>(gs + g_off.AGameStateBase_WorldTime) : 0.0;
                     int32_t num = mem.read<int32_t>(gs + g_off.AGameStateBase_PlayerArray
                                                        + offsets::TArray_Num);
-                    if (clock > 1.0 && clock < 1e7 && num >= 1 && num < 64) {
+                    const bool clockOk = !g_off.AGameStateBase_WorldTime
+                                      || (clock > 1.0 && clock < 1e7);
+                    if (clockOk && num >= 1 && num < 64) {
                         // Only announce a CHANGE -- this now runs on every
                         // re-resolve, and printing each time would bury the
                         // one line that matters: the match handover.
@@ -577,8 +669,9 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
                 uintptr_t c = objs[k];
                 if (!c || (c & 7) || c < 0x10000) continue;
                 if (!mem.vtableInModule(mem.readPtr(c))) continue;
-                double clk = mem.read<double>(c + g_off.AGameStateBase_WorldTime);
-                if (!(clk > 5.0 && clk < 1e7)) continue;
+                double clk = g_off.AGameStateBase_WorldTime
+                           ? mem.read<double>(c + g_off.AGameStateBase_WorldTime) : 0.0;
+                if (g_off.AGameStateBase_WorldTime && !(clk > 5.0 && clk < 1e7)) continue;
                 if (!validateGameState(mem, c)) continue;
                 g_gameState = c;
                 int32_t n = mem.read<int32_t>(c + g_off.AGameStateBase_PlayerArray
@@ -638,55 +731,145 @@ inline uintptr_t findLocalController(const Mem& mem) {
         return mem.readPtr(pawn + g_off.APawn_Controller) == x;
     };
 
-    std::vector<unsigned char> buf((32u << 20) + 0x600);
+    // A controller from the heap is trusted as ours when what it points at
+    // agrees: its PlayerState names the same pawn, and that pawn reaches a
+    // GameState whose player list holds the PlayerState. Objects an earlier
+    // match left in the heap can still close the pawn cycle, so the first
+    // controller the sweep meets is not necessarily live. One that agrees is,
+    // and the sweep stops there instead of reading the rest of the heap.
+    uintptr_t liveGs = 0;
+    auto liveGameStateOf = [&](uintptr_t ctrl) -> uintptr_t {
+        const uintptr_t pawn = mem.readPtr(ctrl + g_off.AController_Pawn);
+        const uintptr_t gs = gameStateOfPawn(mem, pawn);
+        if (!gs) return 0;
+        if (!g_off.AController_PlayerState) return gs;
+        const uintptr_t ps = mem.readPtr(ctrl + g_off.AController_PlayerState);
+        if (!ps || mem.readPtr(ps + g_off.APlayerState_PawnPrivate) != pawn) return 0;
+        return playerListHas(mem, gs, ps) ? gs : 0;
+    };
+
     uintptr_t viaVtable = 0;
     std::vector<uintptr_t> viaCycle;
     std::vector<uintptr_t> camCandidates;
     std::vector<uintptr_t> gsCandidates;
     const uintptr_t knownCamVt = mem.modbase + g_off.VT_APlayerCameraManager;
 
-    for (const MemRegion& r : regions) {
-        for (uintptr_t a = r.base; a < r.base + r.size; ) {
-            size_t n = std::min((size_t)(32u << 20), (size_t)(r.base + r.size - a));
-            size_t got = 0;
-            if (!mem.read_raw_partial(a, buf.data(), n + 0x600, got) || got < 0x600) {
-                if (!mem.read_raw_partial(a, buf.data(), n, got) || got < 0x600) { a += n; continue; }
-            }
-            const uint64_t* q = reinterpret_cast<const uint64_t*>(buf.data());
-            size_t nq = got / 8;
-            size_t need = (g_off.AController_Pawn / 8) + 2;
-            for (size_t i = 0; i + need < nq; i += 2) {
-                if (i * 8 >= n) break;
-                uint64_t vt = q[i];
-                if (!mem.vtableInModule(vt)) continue;
-                uintptr_t x = a + i * 8;
-                if (vt == knownGsVt && !g_gameState && validateGameState(mem, x)) {
-                    g_gameState = x;   // same pass, no second scan
+    // One pass over the heap, in chunks, on every core. It stops as soon as it
+    // holds a controller its own objects vouch for and, when the camera class
+    // is known, the camera manager that points back at it: that is all startup
+    // needs. Found one after the other on a single thread, the controller and
+    // then the camera each cost a sweep of their own.
+    struct Chunk { uintptr_t base; size_t size; };
+    const size_t CH = 32u << 20;
+    std::vector<Chunk> work;
+    for (const MemRegion& r : regions)
+        for (uintptr_t a = r.base; a < r.base + r.size; a += CH)
+            work.push_back({a, std::min(CH, (size_t)(r.base + r.size - a))});
+    const bool wantCam = g_off.VT_APlayerCameraManager && g_off.APlayerCameraManager_PCOwner;
+    std::atomic<size_t> next{0};
+    std::atomic<bool> done{false};
+    std::atomic<bool> haveGs{false};         // a GameState is in hand
+    std::mutex mu;
+    uintptr_t liveCtrl = 0;                  // all of these under mu
+    auto camFor = [&](uintptr_t ctrl) {
+        for (uintptr_t c : camCandidates)
+            if (mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) == ctrl) return true;
+        return false;
+    };
+    unsigned nthreads = std::thread::hardware_concurrency();
+    nthreads = std::max(2u, std::min(16u, nthreads));
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nthreads; t++) {
+        pool.emplace_back([&]() {
+            std::vector<unsigned char> b(CH + 0x600);
+            const size_t need = (g_off.AController_Pawn / 8) + 2;
+            for (;;) {
+                if (done.load(std::memory_order_relaxed)) return;
+                const size_t k = next.fetch_add(1);
+                if (k >= work.size()) return;
+                const Chunk& ck = work[k];
+                size_t got = 0;
+                if (!mem.read_raw_partial(ck.base, b.data(), ck.size + 0x600, got) || got < 0x600) {
+                    if (!mem.read_raw_partial(ck.base, b.data(), ck.size, got) || got < 0x600)
+                        continue;
                 }
-                // No usable GameState vtable (blank build, or it moved in a
-                // patch)? Then collect candidates structurally in the same
-                // sweep and let the match clock decide between them afterwards.
-                if (!g_gameState && g_off.AGameStateBase_PlayerArray) {
-                    size_t ds = g_off.AGameStateBase_PlayerArray / 8;
-                    if (i + ds + 1 < nq) {
-                        uint64_t d = q[i + ds];
-                        int32_t  m = (int32_t)(q[i + ds + 1] & 0xFFFFFFFFu);
-                        if (d && !(d & 7) && m >= 2 && m <= 64 &&
-                            gsCandidates.size() < 64 && validateGameState(mem, x))
-                            gsCandidates.push_back(x);
+                const uint64_t* q = reinterpret_cast<const uint64_t*>(b.data());
+                const size_t nq = got / 8;
+                for (size_t i = 0; i + need < nq; i += 2) {
+                    if (i * 8 >= ck.size) break;
+                    const uint64_t vt = q[i];
+                    if (!mem.vtableInModule(vt)) continue;
+                    const uintptr_t x = ck.base + i * 8;
+                    if (wantCam && vt == knownCamVt) {
+                        std::lock_guard<std::mutex> lk(mu);
+                        if (camCandidates.size() < 64) camCandidates.push_back(x);
+                        if (liveCtrl &&
+                            mem.readPtr(x + g_off.APlayerCameraManager_PCOwner) == liveCtrl)
+                            done = true;
+                    }
+                    if (vt == knownGsVt) {
+                        std::lock_guard<std::mutex> lk(mu);
+                        if (!g_gameState && validateGameState(mem, x)) {
+                            g_gameState = x;   // same pass, no second scan
+                            haveGs = true;
+                        }
+                    }
+                    // No usable GameState vtable (blank build, or it moved in a
+                    // patch)? Then collect candidates structurally in the same
+                    // pass and let the match clock decide between them afterwards.
+                    if (g_off.AGameStateBase_PlayerArray) {
+                        size_t ds = g_off.AGameStateBase_PlayerArray / 8;
+                        if (i + ds + 1 < nq) {
+                            uint64_t d = q[i + ds];
+                            int32_t  m = (int32_t)(q[i + ds + 1] & 0xFFFFFFFFu);
+                            if (d && !(d & 7) && m >= 2 && m <= 64 &&
+                                !haveGs.load(std::memory_order_relaxed)) {
+                                // Checked outside the lock: plenty of objects
+                                // have a small list at this offset, and holding
+                                // it while each is read would put every thread
+                                // back in single file.
+                                bool wanted;
+                                {
+                                    std::lock_guard<std::mutex> lk(mu);
+                                    wanted = !g_gameState && !liveGs && gsCandidates.size() < 64;
+                                }
+                                if (wanted && validateGameState(mem, x)) {
+                                    std::lock_guard<std::mutex> lk(mu);
+                                    if (gsCandidates.size() < 64) gsCandidates.push_back(x);
+                                }
+                            }
+                        }
+                    }
+                    if (vt == knownVt) {
+                        if (closesCycle(x)) {
+                            const uintptr_t gs = liveGameStateOf(x);
+                            std::lock_guard<std::mutex> lk(mu);
+                            if (!liveCtrl) viaVtable = x;
+                            if (gs && !liveCtrl) {
+                                liveCtrl = x;
+                                liveGs = gs;
+                                viaVtable = x;
+                                haveGs = true;
+                                if (!wantCam || camFor(x)) done = true;
+                            }
+                        }
+                        continue;
+                    }
+                    // fallback candidates: any object closing the cycle
+                    uint64_t pawn = q[i + g_off.AController_Pawn / 8];
+                    if (!pawn || (pawn & 15) || pawn == x) continue;
+                    if (!mem.vtableInModule(mem.readPtr(pawn))) continue;
+                    if (mem.readPtr(pawn + g_off.APawn_Controller) == x) {
+                        std::lock_guard<std::mutex> lk(mu);
+                        viaCycle.push_back(x);
                     }
                 }
-                if (vt == knownVt) { if (closesCycle(x)) viaVtable = x; continue; }
-                // fallback candidates: any object closing the cycle
-                uint64_t pawn = q[i + g_off.AController_Pawn / 8];
-                if (!pawn || (pawn & 15) || pawn == x) continue;
-                if (!mem.vtableInModule(mem.readPtr(pawn))) continue;
-                if (mem.readPtr(pawn + g_off.APawn_Controller) == x) viaCycle.push_back(x);
             }
-            a += n;
-        }
-        if (viaVtable && (g_gameState || !gsCandidates.empty()) && !camCandidates.empty()) break;
+        });
     }
+    for (auto& th : pool) th.join();
+    if (liveGs) g_gameState = liveGs;
+    std::vector<unsigned char> buf((32u << 20) + 0x600);
 
     if (!g_gameState && !gsCandidates.empty()) {
         g_gameState = pickGameStateByClock(mem, gsCandidates);
@@ -700,53 +883,72 @@ inline uintptr_t findLocalController(const Mem& mem) {
         }
     }
 
+    // The camera manager for this controller. The controller's own
+    // PlayerCameraManager pointer is the direct way, since the engine spawns
+    // the camera manager on clients too. Without that offset the camera is
+    // matched by its PCOwner back-pointer instead, and because more than one
+    // object holds the controller at that offset, a match has to be the
+    // camera class or at least carry a real view near our pawn.
+    auto pickCamera = [&](uintptr_t ctrl) {
+        if (g_cameraMgr && g_off.APlayerCameraManager_PCOwner &&
+            mem.readPtr(g_cameraMgr + g_off.APlayerCameraManager_PCOwner) != ctrl)
+            g_cameraMgr = 0;                    // the last match's camera
+        if (g_off.APlayerController_CameraManager) {
+            const uintptr_t c = mem.readPtr(ctrl + g_off.APlayerController_CameraManager);
+            if (c && !(c & 7) && mem.vtableInModule(mem.readPtr(c)) &&
+                (!g_off.APlayerCameraManager_PCOwner ||
+                 mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) == ctrl)) {
+                if (c != g_cameraMgr)
+                    printf("[reader] APlayerCameraManager = 0x%lx (the controller's own "
+                           "pointer)\n", c);
+                g_cameraMgr = c;
+                return;
+            }
+        }
+        if (g_cameraMgr || !g_off.APlayerCameraManager_PCOwner) return;
+        const uintptr_t pawn = mem.readPtr(ctrl + g_off.AController_Pawn);
+        for (uintptr_t c : camCandidates) {
+            if (mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) != ctrl) continue;
+            g_cameraMgr = c;
+            printf("[reader] APlayerCameraManager = 0x%lx (camera class, PCOwner match)\n", c);
+            return;
+        }
+        const size_t slot = g_off.APlayerCameraManager_PCOwner / 8;
+        int notCamera = 0;
+        for (const MemRegion& r : regions) {
+            for (uintptr_t a = r.base; a < r.base + r.size; ) {
+                size_t n = std::min((size_t)(32u << 20), (size_t)(r.base + r.size - a));
+                size_t got = 0;
+                if (!mem.read_raw_partial(a, buf.data(), n + 0x600, got) || got < 0x600) {
+                    if (!mem.read_raw_partial(a, buf.data(), n, got) || got < 0x600) { a += n; continue; }
+                }
+                const uint64_t* q2 = reinterpret_cast<const uint64_t*>(buf.data());
+                size_t nq2 = got / 8;
+                for (size_t i = 0; i + slot < nq2; i += 2) {
+                    if (i * 8 >= n) break;
+                    if (q2[i + slot] != ctrl) continue;
+                    if (!mem.vtableInModule(q2[i])) continue;   // a real object
+                    uintptr_t x = a + i * 8;
+                    const CamFit fit = cameraIsOurs(mem, x, pawn);
+                    if (fit == CamFit::None) { notCamera++; continue; }
+                    g_cameraMgr = x;
+                    printf("[reader] APlayerCameraManager = 0x%lx (%s, found by PCOwner "
+                           "back-pointer)\n", x,
+                           fit == CamFit::Class ? "camera class" : "its POV is a real view");
+                    return;
+                }
+                a += n;
+            }
+        }
+        printf("[reader] WARNING: %d object(s) hold the controller at PCOwner and none "
+               "is a camera - falling back to ControlRotation + BaseEyeHeight "
+               "(set g_fov to your in-game FOV)\n", notCamera);
+    };
+
     if (viaVtable) {
         printf("[reader] local APlayerController = 0x%lx (known vtable RVA 0x%X, cycle OK)\n",
                viaVtable, (unsigned)g_off.VT_APlayerController);
-        // The controller does NOT store a usable PlayerCameraManager pointer
-        // (0x488 reads NULL), so match the camera by its PCOwner back-pointer.
-        for (uintptr_t c : camCandidates) {
-            if (mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) == viaVtable) {
-                g_cameraMgr = c;
-                printf("[reader] APlayerCameraManager = 0x%lx (PCOwner match)\n", c);
-                break;
-            }
-        }
-        // The vtable RVA moves on every patch, so candidates gathered by vtable
-        // alone vanish after an update. The back-pointer does not: exactly one
-        // object in the heap holds this controller at +PCOwner. Sweep for that
-        // directly, which needs no vtable at all.
-        if (!g_cameraMgr && g_off.APlayerCameraManager_PCOwner) {
-            const size_t slot = g_off.APlayerCameraManager_PCOwner / 8;
-            for (const MemRegion& r : regions) {
-                if (g_cameraMgr) break;
-                for (uintptr_t a = r.base; a < r.base + r.size; ) {
-                    size_t n = std::min((size_t)(32u << 20), (size_t)(r.base + r.size - a));
-                    size_t got = 0;
-                    if (!mem.read_raw_partial(a, buf.data(), n + 0x600, got) || got < 0x600) {
-                        if (!mem.read_raw_partial(a, buf.data(), n, got) || got < 0x600) { a += n; continue; }
-                    }
-                    const uint64_t* q2 = reinterpret_cast<const uint64_t*>(buf.data());
-                    size_t nq2 = got / 8;
-                    for (size_t i = 0; i + slot < nq2; i += 2) {
-                        if (i * 8 >= n) break;
-                        if (q2[i + slot] != viaVtable) continue;
-                        uintptr_t x = a + i * 8;
-                        if (!mem.vtableInModule(q2[i])) continue;   // a real object
-                        g_cameraMgr = x;
-                        printf("[reader] APlayerCameraManager = 0x%lx (found by PCOwner "
-                               "back-pointer; vtable RVA is 0x%lx)\n",
-                               x, (unsigned long)(q2[i] - mem.modbase));
-                        break;
-                    }
-                    if (g_cameraMgr) break;
-                    a += n;
-                }
-            }
-        }
-        if (!g_cameraMgr)
-            printf("[reader] WARNING: no camera manager found - falling back to "
-                   "ControlRotation + BaseEyeHeight (set g_fov to your in-game FOV)\n");
+        pickCamera(viaVtable);
         return viaVtable;
     }
     if (viaCycle.size() == 1) {
@@ -754,6 +956,7 @@ inline uintptr_t findLocalController(const Mem& mem) {
         printf("[reader] local APlayerController = 0x%lx via cycle; vtable RVA is now 0x%lx\n"
                "         (moved - update g_off.VT_APlayerController)\n",
                x, mem.readPtr(x) - mem.modbase);
+        pickCamera(x);
         return x;
     }
     if (viaCycle.empty()) {
@@ -764,11 +967,15 @@ inline uintptr_t findLocalController(const Mem& mem) {
     std::vector<uintptr_t> real;
     for (uintptr_t x : viaCycle) {
         uintptr_t pawn = mem.readPtr(x + g_off.AController_Pawn);
-        uintptr_t ps   = mem.readPtr(x + g_off.AController_PlayerState);
-        if (!ps || (ps & 7) || !mem.vtableInModule(mem.readPtr(ps))) continue;
-        FRotator r = mem.read<FRotator>(x + g_off.AController_ControlRotation);
-        if (!std::isfinite(r.Yaw) || std::fabs(r.Yaw) > 361.0) continue;
-        if (!pitchLooksHuman(r.Pitch) || !rollIsLevel(r.Roll)) continue;
+        if (g_off.AController_PlayerState) {
+            uintptr_t ps = mem.readPtr(x + g_off.AController_PlayerState);
+            if (!ps || (ps & 7) || !mem.vtableInModule(mem.readPtr(ps))) continue;
+        }
+        if (g_off.AController_ControlRotation) {
+            FRotator r = mem.read<FRotator>(x + g_off.AController_ControlRotation);
+            if (!std::isfinite(r.Yaw) || std::fabs(r.Yaw) > 361.0) continue;
+            if (!pitchLooksHuman(r.Pitch) || !rollIsLevel(r.Roll)) continue;
+        }
         uintptr_t root = pawn ? mem.readPtr(pawn + g_off.AActor_RootComponent) : 0;
         if (!root || (root & 7) || !mem.vtableInModule(mem.readPtr(root))) continue;
         FVector p = mem.read<FVector>(root + g_off.USceneComponent_RelLocation);
@@ -784,12 +991,7 @@ inline uintptr_t findLocalController(const Mem& mem) {
         g_off.VT_APlayerController = mem.readPtr(x) - mem.modbase;
         uintptr_t pawn = mem.readPtr(x + g_off.AController_Pawn);
         if (pawn) g_off.VT_APawn = mem.readPtr(pawn) - mem.modbase;
-        for (uintptr_t c : camCandidates)
-            if (mem.readPtr(c + g_off.APlayerCameraManager_PCOwner) == x) {
-                g_cameraMgr = c;
-                printf("[reader] APlayerCameraManager = 0x%lx (PCOwner match)\n", c);
-                break;
-            }
+        pickCamera(x);
         return x;
     }
     printf("[reader] none of the %zu cycles behaves like a player - "
@@ -922,6 +1124,19 @@ inline void readerThread(uintptr_t UWorld2f) {
     while (g_running) {
         auto t0 = std::chrono::steady_clock::now();
 
+        // Follow our own pawn to the GameState. A new match brings a new one,
+        // and this switches on the first frame, instead of waiting for the old
+        // one to stop validating and a sweep to find the next.
+        if (localCtrl && mem.vtableInModule(mem.readPtr(localCtrl))) {
+            const uintptr_t gs = gameStateOfPawn(
+                mem, mem.readPtr(localCtrl + g_off.AController_Pawn), g_gameState);
+            if (gs && gs != g_gameState) {
+                printf("[reader] GameState 0x%lx, reached from our pawn%s\n", gs,
+                       g_gameState ? " (a new match)" : "");
+                g_gameState = gs;
+            }
+        }
+
         // Re-resolve when the cached objects die (match end, map change, or the
         // tool started at the menu). The scan walks the heap, so it is rate
         // limited to once every 2s rather than run every frame.
@@ -933,6 +1148,9 @@ inline void readerThread(uintptr_t UWorld2f) {
                 std::chrono::duration_cast<std::chrono::milliseconds>(t0 - lastScan).count() > 2000) {
                 lastScan = t0;
                 g_entityCount = 0;
+                // The sweep only looks for a GameState while none is held, so
+                // the last match's has to be let go or it is never replaced.
+                if (g_gameState && !validateGameState(mem, g_gameState)) g_gameState = 0;
                 uintptr_t found = findLocalController(mem);
                 if (found) {
                     localCtrl = found;
@@ -953,13 +1171,15 @@ inline void readerThread(uintptr_t UWorld2f) {
         // ── camera snapshot
         {
             ViewInfo vi;
-            vi.Rotation = mem.read<FRotator>(localCtrl + g_off.AController_ControlRotation);
+            if (g_off.AController_ControlRotation)
+                vi.Rotation = mem.read<FRotator>(localCtrl + g_off.AController_ControlRotation);
             uintptr_t camPawn = ackpawn ? ackpawn : localPawn;
             if (camPawn) {
                 uintptr_t rc = mem.readPtr(camPawn + g_off.AActor_RootComponent);
                 if (rc) {
                     vi.Location = mem.read<FVector>(rc + g_off.USceneComponent_RelLocation);
-                    float eye = mem.read<float>(camPawn + g_off.APawn_BaseEyeHeight);
+                    float eye = g_off.APawn_BaseEyeHeight
+                              ? mem.read<float>(camPawn + g_off.APawn_BaseEyeHeight) : 0.f;
                     if (eye > 0.f && eye < 400.f) vi.Location.Z += eye;
                 }
             }
@@ -967,7 +1187,14 @@ inline void readerThread(uintptr_t UWorld2f) {
             if (vi.FOV < 1.f || vi.FOV > 170.f) vi.FOV = 90.f;
 
             // Prefer the real POV, resolved by PCOwner during the startup scan.
-            uintptr_t camMgr = g_cameraMgr;
+            // The controller's own pointer is read every frame, so a camera
+            // manager replaced during the session is picked up at once.
+            if (g_off.APlayerController_CameraManager) {
+                const uintptr_t c = mem.readPtr(localCtrl + g_off.APlayerController_CameraManager);
+                if (c && c != g_cameraMgr && !(c & 7) && mem.vtableInModule(mem.readPtr(c)))
+                    g_cameraMgr = c;
+            }
+            uintptr_t camMgr = g_off.APlayerCameraManager_POVLoc ? g_cameraMgr : 0;
             if (camMgr && mem.vtableInModule(mem.readPtr(camMgr))) {
                 uintptr_t povLoc = camMgr + g_off.APlayerCameraManager_POVLoc;
                 float f = mem.read<float>(povLoc + povFovOff());
@@ -999,8 +1226,17 @@ inline void readerThread(uintptr_t UWorld2f) {
         }
 
         // ── local squad index
+        // AEmbarkPlayerStateBase::Squad is the squad actor itself, one object
+        // shared by squadmates, so comparing it needs no index to be right.
+        // The squad component on the pawn is the way when that is missing.
+        const bool squadByState = g_off.APlayerState_Squad != 0;
+        const bool squads = g_off.ADiscoveryCharacter_Squad && g_off.Squad_Index;
         int localteam = -1;
-        if (ackpawn) {
+        uintptr_t localSquad = 0;
+        if (squadByState && g_off.AController_PlayerState) {
+            const uintptr_t lps = mem.readPtr(localCtrl + g_off.AController_PlayerState);
+            if (lps) localSquad = mem.readPtr(lps + g_off.APlayerState_Squad);
+        } else if (ackpawn && squads) {
             uintptr_t sc = mem.readPtr(ackpawn + g_off.ADiscoveryCharacter_Squad);
             if (sc) localteam = mem.read<int32_t>(sc + g_off.Squad_Index);
         }
@@ -1028,6 +1264,56 @@ inline void readerThread(uintptr_t UWorld2f) {
         std::vector<uintptr_t> psArr(playerCount);
         mem.read_raw(playerArrPtr, psArr.data(), playerCount * sizeof(uintptr_t));
 
+        // Squads are numbered in the order they are first seen, and the
+        // numbering lasts as long as the GameState does, so a squad keeps its
+        // colour while players join, leave and die.
+        static std::map<uintptr_t, int> s_squadNo;
+        static uintptr_t s_squadGs = 0;
+        if (s_squadGs != gameState) { s_squadNo.clear(); s_squadGs = gameState; }
+        if (squadByState && !localSquad && ackpawn) {
+            for (int i = 0; i < playerCount; i++)
+                if (psArr[i] && mem.readPtr(psArr[i] + g_off.APlayerState_PawnPrivate) == ackpawn) {
+                    localSquad = mem.readPtr(psArr[i] + g_off.APlayerState_Squad);
+                    break;
+                }
+        }
+
+        // The spectator flag hides whoever has it set, so a byte that is not
+        // the flag hides players, and a byte every player shares hides all of
+        // them. A match cannot have every player with a pawn spectating, and
+        // we are not spectating while we play our own pawn. When the byte says
+        // either, it is not the flag, and it hides nobody until it stops.
+        bool hideSpectators = false;
+        if (g_off.APlayerState_Spectator) {
+            int withPawn = 0, flagged = 0;
+            bool selfFlagged = false;
+            for (int i = 0; i < playerCount; i++) {
+                const uintptr_t ps = psArr[i];
+                if (!ps) continue;
+                const uintptr_t pw = mem.readPtr(ps + g_off.APlayerState_PawnPrivate);
+                if (!pw) continue;
+                withPawn++;
+                if (mem.read<uint8_t>(ps + g_off.APlayerState_Spectator) & (1 << 1)) {
+                    flagged++;
+                    if (pw == ackpawn) selfFlagged = true;
+                }
+            }
+            hideSpectators = !selfFlagged && !(withPawn >= 2 && flagged == withPawn);
+            static int s_hide = -1;
+            if (s_hide != (int)hideSpectators && (s_hide != -1 || !hideSpectators)) {
+                if (hideSpectators)
+                    printf("[ents] APlayerState_Spectator 0x%lX fits the match again; "
+                           "hiding spectators\n",
+                           (unsigned long)g_off.APlayerState_Spectator);
+                else
+                    printf("[ents] APlayerState_Spectator 0x%lX marks %s as spectating, "
+                           "which a match cannot have, so it is not the flag and "
+                           "hides nobody\n", (unsigned long)g_off.APlayerState_Spectator,
+                           selfFlagged ? "you while you play" : "every player with a pawn");
+            }
+            s_hide = (int)hideSpectators;
+        }
+
         EntityData tempEnts[kMaxEntities] = {};
         int count = 0;
         // Why does a roster of 12 become one box? Six `continue`s can drop a
@@ -1040,7 +1326,7 @@ inline void readerThread(uintptr_t UWorld2f) {
             uintptr_t ps = psArr[i];
             if (!ps) { dropNoPs++; continue; }
 
-            if (g_off.APlayerState_Spectator) {
+            if (hideSpectators) {
                 uint8_t flags = mem.read<uint8_t>(ps + g_off.APlayerState_Spectator);
                 if (flags & (1 << 1)) { dropSpec++; continue; }
             }
@@ -1102,7 +1388,8 @@ inline void readerThread(uintptr_t UWorld2f) {
             if (ent.distance > g_maxEspDist) { dropDist++; continue; }
 
             // Health - CurrentHealth and HealthMax are doubles in this SDK
-            uintptr_t hc = mem.readPtr(pawn + g_off.ADiscoveryCharacter_Health);
+            uintptr_t hc = (g_off.ADiscoveryCharacter_Health && g_off.Health_A && g_off.Health_B)
+                         ? mem.readPtr(pawn + g_off.ADiscoveryCharacter_Health) : 0;
             if (hc) {
                 float a = mem.read<float>(hc + g_off.Health_A);
                 float b = mem.read<float>(hc + g_off.Health_B);
@@ -1115,12 +1402,33 @@ inline void readerThread(uintptr_t UWorld2f) {
                 }
             }
 
-            // Squad
-            uintptr_t sc = mem.readPtr(pawn + g_off.ADiscoveryCharacter_Squad);
-            if (sc) ent.squadIdx = mem.read<int32_t>(sc + g_off.Squad_Index);
-            // localteam is read from the local pawn each tick above. Squad index
-            // is confirmed correct in every mode, including squads larger than 3.
-            ent.isTeammate = (localteam >= 0 && ent.squadIdx == localteam && !ent.isSelf);
+            // Squad. Who is a squadmate comes from the squad actor, which needs no
+            // number to be right. The colour needs the game's own number for the
+            // squad, its place in the game state's squad list, which the pawn's
+            // squad component holds: the palette follows that order, so a squad
+            // is drawn in the colour the game gives it. Numbering squads in the
+            // order they are first met is only the fallback, and it is arbitrary.
+            if (squadByState) {
+                const uintptr_t sq = mem.readPtr(ps + g_off.APlayerState_Squad);
+                int idx = -1;
+                if (squads) {
+                    const uintptr_t sc = mem.readPtr(pawn + g_off.ADiscoveryCharacter_Squad);
+                    if (sc && !(sc & 7)) idx = mem.read<int32_t>(sc + g_off.Squad_Index);
+                    if (idx < 0 || idx > 63) idx = -1;
+                }
+                if (idx < 0 && sq) {
+                    auto it = s_squadNo.find(sq);
+                    if (it == s_squadNo.end() && s_squadNo.size() < 64)
+                        it = s_squadNo.emplace(sq, (int)s_squadNo.size()).first;
+                    if (it != s_squadNo.end()) idx = it->second;
+                }
+                ent.squadIdx = idx;
+                ent.isTeammate = (localSquad && sq == localSquad && !ent.isSelf);
+            } else {
+                uintptr_t sc = squads ? mem.readPtr(pawn + g_off.ADiscoveryCharacter_Squad) : 0;
+                if (sc) ent.squadIdx = mem.read<int32_t>(sc + g_off.Squad_Index);
+                ent.isTeammate = (localteam >= 0 && ent.squadIdx == localteam && !ent.isSelf);
+            }
 
             // Name. PlayerNamePrivate is marked "GARBAGE on this game, unused"
             // in offsets.hpp and was still being read here; the diagnostic dump
@@ -1138,6 +1446,41 @@ inline void readerThread(uintptr_t UWorld2f) {
 
             ent.valid = true;
             count++;
+        }
+
+        // An empty screen has to say why without a debug build. While players
+        // are listed and none is left to draw, print what removed them, again
+        // every half minute while it lasts, and say when there is someone.
+        // Squadmates are counted too: a squad offset that lands on something
+        // every pawn has alike makes the whole lobby one squad, and this line
+        // is where that shows.
+        {
+            int mates = 0, others = 0;
+            for (int k = 0; k < count; k++) {
+                if (tempEnts[k].isSelf) continue;
+                others++;
+                if (tempEnts[k].isTeammate) mates++;
+            }
+            const int left = others - mates;
+            const bool empty = playerCount >= 2 && left == 0;
+            static bool s_empty = false, s_told = false;
+            static std::chrono::steady_clock::time_point s_since{}, s_said{};
+            if (empty && !s_empty) s_since = t0;
+            if (empty && t0 - s_since > std::chrono::seconds(2) &&
+                (!s_told || t0 - s_said > std::chrono::seconds(30))) {
+                printf("[ents] %d in the player list, none to draw. dropped: spectator "
+                       "%d, no pawn %d, no root %d, at origin %d, past max_esp_dist %d, "
+                       "dead %d, empty slot %d. kept but not drawn: squadmate %d, "
+                       "you %d\n", playerCount, dropSpec, dropNoPawn, dropNoRoot,
+                       dropZeroPos, dropDist, dropDead, dropNoPs, mates, count - others);
+                s_said = t0;
+                s_told = true;
+            }
+            if (!empty && s_told) {
+                printf("[ents] %d player(s) to draw again\n", left);
+                s_told = false;
+            }
+            s_empty = empty;
         }
 
         {

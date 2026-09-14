@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Ymsniper
 // Process memory reads. Prefers the kernel module (/dev/suite_kmod)
@@ -47,8 +48,8 @@ public:
     // silently falling back. kmodOk = reads the module handled; kmodFellBack =
     // reads where the ioctl errored and process_vm_readv was used instead. If
     // kmodFellBack stays 0 while using the module, nothing fell back.
-    mutable uint64_t kmodOk       = 0;
-    mutable uint64_t kmodFellBack = 0;
+    mutable std::atomic<uint64_t> kmodOk{0};
+    mutable std::atomic<uint64_t> kmodFellBack{0};
 
     bool     usingKmod() const { return kmodFd >= 0; }
 

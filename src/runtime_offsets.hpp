@@ -10,6 +10,8 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <initializer_list>
+#include <utility>
 
 // Runtime offsets
 struct RuntimeOffsets {
@@ -55,6 +57,11 @@ struct RuntimeOffsets {
     uintptr_t APlayerCameraManager_POVLoc = 0x0;   // FVector, POV.Location
     uintptr_t POV_RotOffset               = 0x0;   // FRotator, from POV.Location
     uintptr_t POV_FovOffset               = 0x0;   // float, from POV.Location
+    // APlayerController::PlayerCameraManager. Clients spawn a camera manager
+    // too, so the controller's own pointer reaches it without a heap sweep.
+    uintptr_t APlayerController_CameraManager = 0x0;
+    // AEmbarkPlayerStateBase::Squad, the AEmbarkSquad actor squadmates share.
+    uintptr_t APlayerState_Squad          = 0x0;
 
     // ---- vtable RVAs (module base + RVA == IDA address) --------------------
     uintptr_t VT_UWorld                   = 0x0;
@@ -151,6 +158,8 @@ inline std::map<std::string, uintptr_t*> offsetFields(RuntimeOffsets& o) {
         {"APlayerCameraManager_POVLoc",  &o.APlayerCameraManager_POVLoc},
         {"POV_RotOffset",                &o.POV_RotOffset},
         {"POV_FovOffset",                &o.POV_FovOffset},
+        {"APlayerController_CameraManager", &o.APlayerController_CameraManager},
+        {"APlayerState_Squad",           &o.APlayerState_Squad},
         {"VT_UWorld",                    &o.VT_UWorld},
         {"VT_ULevel",                    &o.VT_ULevel},
         {"VT_APlayerController",         &o.VT_APlayerController},
@@ -221,8 +230,8 @@ inline bool loadOffsets(const char* path = nullptr) {
     std::ifstream f(path);
     if (!f) return false;
     auto fields = offsetFields(g_off);
+    std::map<std::string, uintptr_t> seen;
     std::string line;
-    int n = 0;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
         auto eq = line.find('=');
@@ -233,28 +242,102 @@ inline bool loadOffsets(const char* path = nullptr) {
         while (!v.empty() && isspace((unsigned char)v.front())) v.erase(v.begin());
         auto it = fields.find(k);
         if (it == fields.end()) continue;
-        *it->second = (uintptr_t)strtoull(v.c_str(), nullptr, 0);
-        n++;
+        const uintptr_t val = (uintptr_t)strtoull(v.c_str(), nullptr, 0);
+        // A key written twice is a hand edit on top of a derived file, and
+        // only the later line counts. Say so, or the value that looks right in
+        // the file is not the one being used.
+        auto dup = seen.find(k);
+        if (dup != seen.end() && dup->second != val)
+            printf("[offsets] %s is set twice (0x%lX, then 0x%lX); the later "
+                   "line wins\n", k.c_str(), (unsigned long)dup->second,
+                   (unsigned long)val);
+        seen[k] = val;
+        *it->second = val;
     }
-    printf("[offsets] loaded %d value(s) from %s\n", n, path);
-    return n > 0;
+    printf("[offsets] loaded %zu value(s) from %s\n", seen.size(), path);
+    return !seen.empty();
 }
 
-// Offsets are the whole tool: with them zero every read lands on nothing and the
-// ESP draws an empty screen with no explanation. Name the missing ones instead.
+// Offsets are the whole tool, but a box needs only a few of them: the
+// controller and pawn that point at each other, the player list and each
+// player's pawn, where a pawn stands, and a camera. Without one of those
+// nothing can be found or projected, so startup stops and names it.
+//
+// Every other offset serves one feature, and a zero there is not harmless by
+// itself: the read still happens, lands on the object's vtable pointer, and
+// uses that as the member. For the squad that pointer is the same on every
+// pawn, so every player becomes a squadmate and nothing is drawn. The reads
+// check their own offset first, and this lists once what is switched off.
 inline bool offsetsSane() {
     struct { const char* name; uintptr_t v; } required[] = {
-        { "GObjects_RVA",                g_off.GObjects_RVA },
         { "AController_Pawn",            g_off.AController_Pawn },
         { "APawn_Controller",            g_off.APawn_Controller },
         { "AActor_RootComponent",        g_off.AActor_RootComponent },
         { "USceneComponent_RelLocation", g_off.USceneComponent_RelLocation },
         { "AGameStateBase_PlayerArray",  g_off.AGameStateBase_PlayerArray },
         { "APlayerState_PawnPrivate",    g_off.APlayerState_PawnPrivate },
-        { "APawn_Mesh",                  g_off.APawn_Mesh },
     };
     int missing = 0;
     for (auto& r : required)
         if (!r.v) { printf("[offsets] MISSING: %s\n", r.name); missing++; }
-    return missing == 0;
+    const bool pov = g_off.APlayerCameraManager_PCOwner && g_off.APlayerCameraManager_POVLoc;
+    if (!pov && !g_off.AController_ControlRotation) {
+        printf("[offsets] MISSING: a camera. Either APlayerCameraManager_PCOwner "
+               "and APlayerCameraManager_POVLoc, or AController_ControlRotation\n");
+        missing++;
+    }
+    if (missing) return false;
+
+    auto feature = [](const char* what,
+                      std::initializer_list<std::pair<const char*, uintptr_t>> need) {
+        std::string none;
+        for (auto& n : need)
+            if (!n.second) { if (!none.empty()) none += ", "; none += n.first; }
+        if (!none.empty())
+            printf("[offsets] off: %s (no %s)\n", what, none.c_str());
+    };
+    feature("hiding spectators",
+            {{"APlayerState_Spectator", g_off.APlayerState_Spectator}});
+    if (!g_off.APlayerState_Squad &&
+        !(g_off.ADiscoveryCharacter_Squad && g_off.Squad_Index))
+        printf("[offsets] off: squads, so squadmates are drawn and aimed at like "
+               "anyone else (no APlayerState_Squad, and no ADiscoveryCharacter_Squad "
+               "with Squad_Index)\n");
+    feature("health bars and skipping the dead",
+            {{"ADiscoveryCharacter_Health", g_off.ADiscoveryCharacter_Health},
+             {"Health_A", g_off.Health_A}, {"Health_B", g_off.Health_B}});
+    feature("the visibility check, so everyone counts as visible",
+            {{"Mesh_LastRenderTime", g_off.Mesh_LastRenderTime}});
+    feature("names", {{"APlayerState_DisplayName", g_off.APlayerState_DisplayName}});
+    feature("the head from the bones, so boxes come from the capsule",
+            {{"APawn_Mesh", g_off.APawn_Mesh},
+             {"Mesh_BoneArray", g_off.Mesh_BoneArray},
+             {"Mesh_ComponentToWorld", g_off.Mesh_ComponentToWorld}});
+    if (!(g_off.Mesh_BoneTree && g_off.BoneTree_Parents))
+        feature("the skeleton",
+                {{"Mesh_SkeletalMeshAsset", g_off.Mesh_SkeletalMeshAsset},
+                 {"SkeletalMesh_Skeleton", g_off.SkeletalMesh_Skeleton}});
+    feature("the capsule height",
+            {{"ACharacter_CapsuleComponent", g_off.ACharacter_CapsuleComponent},
+             {"Capsule_HalfHeight", g_off.Capsule_HalfHeight}});
+    feature("eye height", {{"APawn_BaseEyeHeight", g_off.APawn_BaseEyeHeight}});
+    feature("reading velocity, so it is measured from movement",
+            {{"SceneComp_ComponentVelocity", g_off.SceneComp_ComponentVelocity}});
+    if (g_off.AController_ControlRotation)
+        feature("the game's camera, so the view is built from ControlRotation and "
+                "the FOV setting",
+                {{"APlayerCameraManager_PCOwner", g_off.APlayerCameraManager_PCOwner},
+                 {"APlayerCameraManager_POVLoc", g_off.APlayerCameraManager_POVLoc}});
+    feature("reaching the camera from the controller, so a heap sweep finds it",
+            {{"APlayerController_CameraManager", g_off.APlayerController_CameraManager}});
+    feature("reaching the GameState from our pawn, so a heap sweep finds it",
+            {{"ADiscoveryCharacter_AnimSU", g_off.ADiscoveryCharacter_AnimSU},
+             {"AnimSU_GameState", g_off.AnimSU_GameState}});
+    feature("picking the GameState by its match clock",
+            {{"AGameStateBase_WorldTime", g_off.AGameStateBase_WorldTime}});
+    feature("checking the local controller's PlayerState",
+            {{"AController_PlayerState", g_off.AController_PlayerState}});
+    feature("the object array, so a heap sweep finds the player",
+            {{"GObjects_RVA", g_off.GObjects_RVA}});
+    return true;
 }

@@ -237,9 +237,21 @@ quickly someone drops out of visible after breaking line of sight.
 Every game-specific address lives in `offsets.cfg`, read at startup from the
 working directory or one level above it.
 
-The tool **refuses to start without it** and names anything missing. This is
-deliberate: an offset that is silently zero produces an empty screen with no
-explanation, which is far worse to diagnose than a clear failure.
+The tool **refuses to start without it**, or without the few offsets nothing
+works without: the controller and pawn that point at each other, the player
+list, each player's pawn, where a pawn stands, and a camera (the camera
+manager's POV, or the controller's rotation). It names whichever are missing.
+
+Every other offset belongs to one feature, and an empty one turns off only that
+feature. The tool lists what is off when it starts. Nothing is left silently
+zero, because a zero offset still reads something: the object's vtable pointer,
+which for the squad is the same on every pawn, so every player looks like your
+squadmate and the screen stays empty with no explanation.
+
+The spectator flag can hide the whole lobby when it is wrong rather than empty,
+so it is checked against the match while it runs, ignored when it contradicts
+it, and the log says so. When players are listed but none is drawn, the log
+says what removed them, squadmates included.
 
 A game update moves these. When that happens the tool starts but finds nothing.
 Re-derive the offsets and copy the new `offsets.cfg` here. No rebuild is needed.
