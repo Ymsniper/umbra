@@ -18,15 +18,17 @@ struct RuntimeOffsets {
     // ---- verified by a closed two-hop cycle -------------------------------
  // ---- the GEngine chain: every live object by pointer, no heap sweep -------
     uintptr_t GEngine_RVA                 = 0x0;   // static; NEVER FOUND on this build
-    uintptr_t GObjects_RVA                = 0x0;   // module global holding it
-    uintptr_t GObjects_Key                = 0x0;   // XOR after the shuffles
+    uintptr_t GObjects_RVA                = 0x0;   // the 128-bit module global
+    uintptr_t GObjects_KeyA               = 0x0;   // the caller's first key
+    uintptr_t GObjects_KeyB               = 0x0;   // the caller's second key
     uintptr_t GObjects_NumKey             = 0x0;   // NumElements XOR, bswapped
     uintptr_t GObjects_ObjKey             = 0x0;   // Objects XOR, bswapped
-    uintptr_t GObjects_Imm1               = 0x0;   // first pshuflw immediate
-    uintptr_t GObjects_Imm2               = 0x0;   // second pshuflw immediate
-    uintptr_t GObjects_Shift              = 0x0;   // psrld count, per 32-bit lane
     uintptr_t GObjects_NumOff             = 0x0;   // NumElements member offset
     uintptr_t GObjects_ObjOff             = 0x0;   // Objects member offset
+    uintptr_t GObjects_EntryBase          = 0x0;   // object pointer inside an entry
+    uintptr_t GObjects_Stride             = 0x0;   // bytes per entry
+    uintptr_t GObjects_IndexOff           = 0x0;   // where an object holds its index
+    uintptr_t GObjects_ChunkShift         = 0x0;   // index >> this = the chunk
     uintptr_t UGameEngine_GameInstance    = 0x0;
     uintptr_t UGameInstance_LocalPlayers  = 0x0;
     uintptr_t UPlayer_PlayerController    = 0x0;
@@ -101,10 +103,10 @@ struct RuntimeOffsets {
     uintptr_t ACharacter_CapsuleComponent = 0x0;
     uintptr_t Capsule_HalfHeight          = 0x0;   // float
 
-    // ---- health (MEASURED, not from the SDK) ------------------------------
-    //  Two adjacent floats reading 150/250/350 (Light/Medium/Heavy) across six
-    //  players. Which is Current is not assumed: smaller = current, larger =
-    //  max. The old SDK value 0x5C8 read a constant 100 for everyone.
+    // ---- health -----------------------------------------------------------
+    //  Two adjacent floats, holding the class totals 150, 250 and 350 for
+    //  Light, Medium and Heavy. Which one is current is not assumed: the
+    //  smaller is current and the larger is max, on every player and frame.
     uintptr_t ADiscoveryCharacter_Health  = 0x0;   // UHealthComponent*
     uintptr_t HealthComp_MaxDouble        = 0x0;   // HealthMax, reflected
     uintptr_t HealthComp_ScanLo           = 0x0;   // trailing pad: health lives here
@@ -112,7 +114,7 @@ struct RuntimeOffsets {
     uintptr_t Health_A                    = 0x0;   // float
     uintptr_t Health_B                    = 0x0;   // float
 
-    // ---- squad / team (SDK values, confirmed correct in every mode) -------
+    // ---- squad / team, through the component on the pawn ------------------
     uintptr_t ADiscoveryCharacter_Squad   = 0x0;   // USquadComponent*
     uintptr_t Squad_Index                 = 0x0;   // int32
 };
@@ -123,14 +125,16 @@ inline std::map<std::string, uintptr_t*> offsetFields(RuntimeOffsets& o) {
     return {
         {"GEngine_RVA",                  &o.GEngine_RVA},
         {"GObjects_RVA",                 &o.GObjects_RVA},
-        {"GObjects_Key",                 &o.GObjects_Key},
+        {"GObjects_KeyA",                &o.GObjects_KeyA},
+        {"GObjects_KeyB",                &o.GObjects_KeyB},
         {"GObjects_NumKey",              &o.GObjects_NumKey},
         {"GObjects_ObjKey",              &o.GObjects_ObjKey},
-        {"GObjects_Imm1",                &o.GObjects_Imm1},
-        {"GObjects_Imm2",                &o.GObjects_Imm2},
-        {"GObjects_Shift",               &o.GObjects_Shift},
         {"GObjects_NumOff",              &o.GObjects_NumOff},
         {"GObjects_ObjOff",              &o.GObjects_ObjOff},
+        {"GObjects_EntryBase",           &o.GObjects_EntryBase},
+        {"GObjects_Stride",              &o.GObjects_Stride},
+        {"GObjects_IndexOff",            &o.GObjects_IndexOff},
+        {"GObjects_ChunkShift",          &o.GObjects_ChunkShift},
         {"UGameEngine_GameInstance",     &o.UGameEngine_GameInstance},
         {"UGameInstance_LocalPlayers",   &o.UGameInstance_LocalPlayers},
         {"UPlayer_PlayerController",     &o.UPlayer_PlayerController},
@@ -196,14 +200,6 @@ inline std::map<std::string, uintptr_t*> offsetFields(RuntimeOffsets& o) {
 
 // FMinimalViewInfo spacing, with the values verified on this build as the
 // fallback. A config that does not mention them behaves exactly as before.
-// The GObjects decode shape, with this build's verified values as the fallback
-// so a config that predates these keys behaves exactly as before.
-inline uint8_t   goImm1()   { return g_off.GObjects_Imm1  ? uint8_t(g_off.GObjects_Imm1)  : 0xB1; }
-inline uint8_t   goImm2()   { return g_off.GObjects_Imm2  ? uint8_t(g_off.GObjects_Imm2)  : 0x39; }
-inline int       goShift()  { return g_off.GObjects_Shift ? int(g_off.GObjects_Shift)     : 5; }
-inline uintptr_t goNumOff() { return g_off.GObjects_NumOff ? g_off.GObjects_NumOff        : 0x0C; }
-inline uintptr_t goObjOff() { return g_off.GObjects_ObjOff ? g_off.GObjects_ObjOff        : 0x20; }
-
 inline uintptr_t povRotOff() {
     return g_off.POV_RotOffset ? g_off.POV_RotOffset : 0x20;
 }
@@ -328,7 +324,8 @@ inline bool offsetsSane() {
                 "the FOV setting",
                 {{"APlayerCameraManager_PCOwner", g_off.APlayerCameraManager_PCOwner},
                  {"APlayerCameraManager_POVLoc", g_off.APlayerCameraManager_POVLoc}});
-    feature("reaching the camera from the controller, so a heap sweep finds it",
+    feature("reaching the camera from the controller, so it is matched by its "
+            "back-pointer among the objects instead",
             {{"APlayerController_CameraManager", g_off.APlayerController_CameraManager}});
     feature("reaching the GameState from our pawn, so a heap sweep finds it",
             {{"ADiscoveryCharacter_AnimSU", g_off.ADiscoveryCharacter_AnimSU},
@@ -337,7 +334,10 @@ inline bool offsetsSane() {
             {{"AGameStateBase_WorldTime", g_off.AGameStateBase_WorldTime}});
     feature("checking the local controller's PlayerState",
             {{"AController_PlayerState", g_off.AController_PlayerState}});
-    feature("the object array, so a heap sweep finds the player",
-            {{"GObjects_RVA", g_off.GObjects_RVA}});
+    feature("the object array, so the heap is swept to find the player",
+            {{"GObjects_RVA", g_off.GObjects_RVA},
+             {"GObjects_KeyA", g_off.GObjects_KeyA},
+             {"GObjects_KeyB", g_off.GObjects_KeyB},
+             {"GObjects_ChunkShift", g_off.GObjects_ChunkShift}});
     return true;
 }

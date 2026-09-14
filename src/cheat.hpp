@@ -536,8 +536,8 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
         printf("[gobjects] %zu object pointers read in blocks\n", objs.size());
     }
 
-    // Count what happens at every gate. A validation added without a way to
-    // see what it rejects is how "no cycle found" turned into a mystery twice.
+    // Count what happens at every gate, so a run that finds nobody says which
+    // test rejected everything rather than only that nothing survived.
     int nObj = 0, nVt = 0, nPawn = 0, nCycle = 0, nReal = 0;
     uintptr_t firstCycleCtrl = 0, firstCyclePawn = 0;
 
@@ -1101,13 +1101,13 @@ inline void readerThread(uintptr_t UWorld2f) {
 
     (void)UWorld2f;
 
-    // Preferred path: walk GEngine -> GameInstance -> LocalPlayer -> Controller.
-    // Six pointer reads, no heap sweep, and correct again the instant a new
-    // match creates new objects. The sweep is kept only for when the chain is
-    // unavailable (GEngine_RVA not yet found) or returns nothing.
+    // Preferred path: the engine's object array, which gives every live object
+    // by index, so the player is found by reading rather than by searching. The
+    // heap sweep is kept for when the array's constants are missing or do not
+    // decode, which is what a game patch does to them.
     uintptr_t localCtrl = 0, localPawn = 0;
     if (!localCtrl) {
-        printf("[reader] scanning for the local player (Controller<->Pawn cycle)...\n");
+        printf("[reader] resolving the local player...\n");
         localCtrl = findLocalController(mem);
         localPawn = mem.readPtr(localCtrl + g_off.AController_Pawn);
     }
@@ -1387,7 +1387,7 @@ inline void readerThread(uintptr_t UWorld2f) {
             ent.distance = (float)(ent.origin.dist(selfPos) / 100.0);
             if (ent.distance > g_maxEspDist) { dropDist++; continue; }
 
-            // Health - CurrentHealth and HealthMax are doubles in this SDK
+            // Health: two adjacent floats, the smaller of them the current one
             uintptr_t hc = (g_off.ADiscoveryCharacter_Health && g_off.Health_A && g_off.Health_B)
                          ? mem.readPtr(pawn + g_off.ADiscoveryCharacter_Health) : 0;
             if (hc) {
@@ -1430,9 +1430,9 @@ inline void readerThread(uintptr_t UWorld2f) {
                 ent.isTeammate = (localteam >= 0 && ent.squadIdx == localteam && !ent.isSelf);
             }
 
-            // Name. PlayerNamePrivate is marked "GARBAGE on this game, unused"
-            // in offsets.hpp and was still being read here; the diagnostic dump
-            // uses DisplayName + Discriminator, which is what actually resolves.
+            // Name. The engine's own PlayerNamePrivate is unused on this game;
+            // what the match shows is DisplayName with the discriminator after
+            // it, the same pair the scoreboard prints.
             if (g_off.APlayerState_DisplayName) {
                 ent.name = readFString(mem, ps + g_off.APlayerState_DisplayName);
                 if (g_off.APlayerState_Discriminator) {

@@ -253,6 +253,12 @@ so it is checked against the match while it runs, ignored when it contradicts
 it, and the log says so. When players are listed but none is drawn, the log
 says what removed them, squadmates included.
 
+Some of the offsets describe the engine's object array rather than a member:
+where the module keeps its address, the two keys that unscramble it, and how its
+entries are laid out. With those the tool reads its way to the player and starts
+at once. Without them it falls back to scanning the game's memory for the same
+thing, which works but costs seconds at every start and again after each match.
+
 A game update moves these. When that happens the tool starts but finds nothing.
 Re-derive the offsets and copy the new `offsets.cfg` here. No rebuild is needed.
 

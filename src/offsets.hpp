@@ -42,9 +42,9 @@ namespace offsets {
     // ── GEngine chain (preferred: avoids encrypted GWorld)
     namespace UEngine {
         constexpr uintptr_t GameInstance  = 0x1530; // UEmbarkGameEngine::GameInstance (ID marker)
-        // GameViewport offset is build-specific; resolved at runtime by --find-engine.
-        // Common UE5 range is 0x0840..0x0880. Set once found:
-        constexpr uintptr_t GameViewport  = 0x0000; // TODO: fill from --find-engine output
+        // Build-specific, and zero because it has never been located on this
+        // one. --find-engine reports it where it can be resolved.
+        constexpr uintptr_t GameViewport  = 0x0000;
     }
     namespace UGameViewportClient {
         constexpr uintptr_t GameInstance = 0x00F8; // SDK confirmed
