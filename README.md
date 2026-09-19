@@ -222,6 +222,25 @@ flicker distance and its slowest and fastest rates are all in the menu's
 Off-screen tab. Opacity sets how solid the whole indicator is, flicker and text
 included, and Far opacity how much of that the farthest pins keep.
 
+### Sonar
+
+A radar in a window of its own, so it can sit beside the game or on a second
+screen rather than over the view. It turns with you: up is always the way you
+are facing, and you are the marker at the centre.
+
+* **Squad colours**, the same ones the ESP draws, so a squad reads the same in
+  both. Squadmates and spectators are left out; the sonar is for what you
+  cannot see.
+* **Class letters** in each blip, L, M or H, or plain dots to read it at a
+  glance.
+* **Range** is centre to rim, in metres. Anyone past it is not drawn at all,
+  so nothing piles up against the edge, and optional rings at a third and two
+  thirds give the distance a scale.
+* **Where you put it**: drag it anywhere, resize it from the corner, then lock
+  it in place. Position, size and opacity are all remembered.
+
+It has its own tab in the menu.
+
 ### Aim assist
 
 Pulls toward a target while the chosen mouse button is held.
