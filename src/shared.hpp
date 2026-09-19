@@ -69,6 +69,7 @@ struct Status {
     uint64_t kmodFellBack   = 0;
     uint8_t  aimHeld        = 0;
     uint8_t  aimSuppressed  = 0;
+    uint8_t  aimKillPaused  = 0;
     uint8_t  trigHeld       = 0;
     uint8_t  trigOnTarget   = 0;
     uint8_t  visHave        = 0;

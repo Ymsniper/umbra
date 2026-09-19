@@ -429,8 +429,38 @@ inline void renderFrame(const Font& font)
                       std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
+    // Pause after a kill. The aim's target is followed by player, not by slot.
+    // Once it is gone from the list, or left in it only as a spectator, it has
+    // died, and the aim stops rather than move on to whoever is next. Missing
+    // from one list can be a bad read, so it has to be missing from the next
+    // list too; until then the aim holds still, so it never drifts toward
+    // anyone else in between.
+    static uintptr_t s_lockId  = 0;
+    static uint64_t  s_goneGen = 0;
+    bool holdForKill = false;
+    if (!g_aimKillPause || !g_aimHeld || g_aimKillPaused) {
+        s_lockId = 0; s_goneGen = 0;
+    } else if (s_lockId) {
+        std::lock_guard<std::mutex> lk(g_entityMtx);
+        bool alive = false;
+        for (int i = 0; i < g_entityCount && !alive; i++)
+            alive = g_entities[i].valid && g_entities[i].id == s_lockId
+                 && !g_entities[i].isSpectator;
+        if (alive) {
+            s_goneGen = 0;
+        } else if (!s_goneGen || g_entityGen == s_goneGen) {
+            if (!s_goneGen) s_goneGen = g_entityGen;
+            holdForKill = true;
+        } else {
+            g_aimKillPaused = true;
+            g_aimKillAt = std::chrono::steady_clock::now();
+            s_lockId = 0; s_goneGen = 0;
+        }
+    }
+
     // aim assist
-    const bool aimActive  = g_aimEnabled  && g_aimHeld && !g_aimSuppressed;
+    const bool aimActive  = g_aimEnabled  && g_aimHeld && !g_aimSuppressed
+                          && !g_aimKillPaused && !holdForKill;
     const bool trigActive = g_trigEnabled && g_trigHeld;
     bool trigWantFire = false;
 
@@ -570,6 +600,7 @@ inline void renderFrame(const Font& font)
             }
         }
         g_aimLockedIdx = found ? bestIdx : -1;
+        if (aimActive && g_aimKillPause) s_lockId = found ? g_entities[bestIdx].id : 0;
         g_aimTargetCnt = considered;
         g_aimSkelCnt   = skelCnt;
         g_aimNoSkelCnt = noSkelCnt;

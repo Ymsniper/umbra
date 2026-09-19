@@ -30,7 +30,7 @@ int sonarMain(SharedState* sh);
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.5.1";
+static constexpr const char*    kUmbraVersion = "1.5.2";
 static constexpr const char*    kProcName   = "Discovery-d.exe";
 static constexpr const char*    kModuleName = "Discovery-d.exe";
 static constexpr int            kWindowW    = 1920;
@@ -71,6 +71,7 @@ static void publishStatus(SharedState* sh) {
     st.kmodFellBack    = g_mem.kmodFellBack;
     st.aimHeld         = g_aimHeld       ? 1 : 0;
     st.aimSuppressed   = g_aimSuppressed ? 1 : 0;
+    st.aimKillPaused   = g_aimKillPaused ? 1 : 0;
     st.trigHeld        = g_trigHeld      ? 1 : 0;
     st.trigOnTarget    = g_trigOnTarget  ? 1 : 0;
     st.visHave         = g_visHave       ? 1 : 0;
@@ -325,6 +326,23 @@ int main(int argc, char* argv[]) {
                     g_aimSuppressed = false;
                 }
                 prevLmb = lmb; prevAim = g_aimHeld;
+            }
+
+            // Pause after a kill. renderFrame starts it when the aim's target
+            // dies; a fresh press of the aim button ends it, and so does the
+            // delay if one is set.
+            {
+                static bool prevAim = false;
+                if (!g_aimKillPause) {
+                    g_aimKillPaused = false;
+                } else if (g_aimKillPaused) {
+                    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - g_aimKillAt).count();
+                    if ((g_aimHeld && !prevAim) ||
+                        (g_aimKillRestoreMs > 0 && ms >= g_aimKillRestoreMs))
+                        g_aimKillPaused = false;
+                }
+                prevAim = g_aimHeld;
             }
 
             // INSERT belongs to the menu process; this window never takes

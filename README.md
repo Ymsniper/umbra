@@ -246,6 +246,9 @@ Pulls toward a target while the chosen mouse button is held.
   is yours to ride rather than something the assist fights. It re-arms on the
   next ADS press, or after a delay if you set one. Needs the aim held on right
   mouse, since the shot has to be a different button from the aim.
+* **Pause after a kill**: when the player the aim is pulling onto dies, the aim
+  stops instead of moving on to the next closest one. It re-arms on the next
+  press of the aim button, or after a delay if you set one. Off by default.
 
 ### Triggerbot
 

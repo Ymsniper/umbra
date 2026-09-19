@@ -6,6 +6,7 @@
 #include "structs.hpp"
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -65,6 +66,7 @@ inline constexpr int kMaxEntities = 64;
 inline std::mutex       g_entityMtx;
 inline EntityData       g_entities[kMaxEntities];
 inline int              g_entityCount = 0;
+inline uint64_t         g_entityGen   = 0;   // bumped with every list published
 
 inline ViewInfo         g_camView;    // camera snapshot (reader side writes)
 inline std::mutex       g_camMtx;
@@ -166,6 +168,13 @@ inline bool  g_aimQuickScope     = false;
 inline int   g_aimQuickRestoreMs = 0;      // 0 = only on the next ADS press
 inline bool  g_lmbHeld           = false;  // runtime: fire button, polled
 inline bool  g_aimSuppressed     = false;  // runtime: released by the shot
+// Pause after a kill: once the player the aim is pulling onto dies, the aim
+// stops instead of moving on to whoever is next, until its button is pressed
+// again, or until the delay runs out if one is set.
+inline bool  g_aimKillPause      = false;
+inline int   g_aimKillRestoreMs  = 0;      // 0 = only on the next press
+inline bool  g_aimKillPaused     = false;  // runtime: paused by a kill
+inline std::chrono::steady_clock::time_point g_aimKillAt{};   // runtime
 inline bool  g_trigSkeleton    = false;
 inline int   g_trigSkelPart    = 0;      // 0 head, 1 chest, 2 body, 3 legs, 4 ALL body
 inline bool  g_trigOnTarget    = false;  // runtime: is the crosshair on target now

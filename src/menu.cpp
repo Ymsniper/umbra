@@ -82,10 +82,12 @@ static void drawSettingsPanel(const Status& st) {
     ImGui::TextDisabled("| %d entities", st.entityCount);
     if (g_aimEnabled) {
         ImGui::SameLine();
-        ImGui::TextColored(st.aimSuppressed ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f)
+        ImGui::TextColored(st.aimSuppressed || st.aimKillPaused
+                                             ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f)
                            : st.aimHeld       ? kAccent
                                              : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                           st.aimSuppressed ? "| aim released"
+                           st.aimKillPaused ? "| aim paused (kill)"
+                           : st.aimSuppressed ? "| aim released"
                            : st.aimHeld     ? "| AIM" : "| aim");
     }
     if (g_trigEnabled) {
@@ -240,6 +242,15 @@ static void drawSettingsPanel(const Status& st) {
         }
         if (!qsUsable) ImGui::EndDisabled();
 
+        ImGui::Checkbox("Pause after a kill", &g_aimKillPause);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(no snapping to the next target)");
+        if (g_aimKillPause) {
+            ImGui::SliderInt("Re-arm (ms)##kill", &g_aimKillRestoreMs, 0, 1500);
+            ImGui::SameLine();
+            ImGui::TextDisabled(g_aimKillRestoreMs == 0 ? "(next press)" : "");
+        }
+
         ImGui::Separator();
         ImGui::TextDisabled("Target choice");
         ImGui::SliderFloat("Near me <-> crosshair", &g_aimTargetBias, 0.f, 1.f, "%.2f");
@@ -263,7 +274,9 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Separator();
         ImGui::Text("%d in range", st.aimTargetCnt);
         ImGui::SameLine();
-        if (st.aimSuppressed)
+        if (st.aimKillPaused)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  paused (kill)");
+        else if (st.aimSuppressed)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  released (shot)");
         else
             ImGui::TextColored(st.aimHeld ? kAccent

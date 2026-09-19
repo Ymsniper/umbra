@@ -1562,6 +1562,7 @@ inline void readerThread(uintptr_t UWorld2f) {
             std::lock_guard<std::mutex> lk(g_entityMtx);
             for (int k = 0; k < count; k++) g_entities[k] = tempEnts[k];
             g_entityCount = count;
+            g_entityGen++;
         }
 
         // ~60 Hz
