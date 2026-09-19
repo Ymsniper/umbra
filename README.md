@@ -183,6 +183,7 @@ so it comes back the way you left it.
 ## Features
 
 ### ESP
+<img width="872" height="539" alt="esp" src="https://github.com/user-attachments/assets/b46d1fd6-cf1a-4f23-967e-d86d5dbbebd7" />
 
 Boxes, skeletons, names, health bars, distance and snaplines. Squad colours
 distinguish teams, and a master opacity slider governs everything drawn.
@@ -197,6 +198,7 @@ and the off-screen pins never do, and the aim assist and triggerbot pass over
 them unless told otherwise in the Aim tab.
 
 ### Off-screen indicators
+<img width="910" height="528" alt="off-screen" src="https://github.com/user-attachments/assets/5b3b7413-eb4c-40ed-85cb-982086c60dd4" />
 
 Anyone behind you, beside you or past the edge of the screen gets a pin along
 the window's edge, in their squad's colour, pointing their way. In front
@@ -223,6 +225,7 @@ Off-screen tab. Opacity sets how solid the whole indicator is, flicker and text
 included, and Far opacity how much of that the farthest pins keep.
 
 ### Sonar
+<img width="754" height="289" alt="sonar" src="https://github.com/user-attachments/assets/c502f090-42d2-412e-8105-202913c3caf0" />
 
 A radar in a window of its own, so it can sit beside the game or on a second
 screen rather than over the view. It turns with you: up is always the way you
@@ -242,6 +245,7 @@ are facing, and you are the marker at the centre.
 It has its own tab in the menu.
 
 ### Aim assist
+<img width="797" height="702" alt="aim" src="https://github.com/user-attachments/assets/182280ef-5cde-4563-80af-490bb3216545" />
 
 Pulls toward a target while the chosen mouse button is held.
 
@@ -270,6 +274,7 @@ Pulls toward a target while the chosen mouse button is held.
   press of the aim button, or after a delay if you set one. Off by default.
 
 ### Triggerbot
+<img width="910" height="404" alt="trigger" src="https://github.com/user-attachments/assets/f3b43775-d6e3-41c6-b5f9-bb093ab83bc5" />
 
 Fires when the crosshair is on target.
 
@@ -284,6 +289,7 @@ Fires when the crosshair is on target.
   crosshair lands), **click duration** and **cooldown** are all adjustable.
 
 ### Visibility
+<img width="910" height="249" alt="visibility" src="https://github.com/user-attachments/assets/5f4dfb99-9d1b-4498-93db-89cb16cc9709" />
 
 Players who are not currently being drawn by the game are crossed out and faded,
 and the aim assist and triggerbot can each be told to ignore them.
