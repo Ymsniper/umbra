@@ -21,8 +21,13 @@ struct EntityData {
     float     capsuleHalf = 0.f;
     FVector   headWorld;
     FVector   feetWorld;
+    // The player state's address: the same player for the whole match, across
+    // respawns, so anything drawn over time can follow one player.
+    uintptr_t id          = 0;
     bool      isSelf      = false;
     bool      isTeammate  = false;   // same SquadIndex as the local player
+    // In the player list with no health on its pawn, or with the game's own
+    // spectator flag. The game never draws it and nothing can hit it.
     bool      isSpectator = false;
 
     FVector   origin;   // world-space root location
@@ -69,6 +74,9 @@ inline std::atomic<bool> g_running { true };
 // Feature flags (toggled at runtime)
 inline bool g_espBoxes      = true;
 inline bool g_espSnaplines  = false;  // line from screen bottom to each target
+// From the crosshair to the middle of the box instead. The off-screen pins point
+// along the same projection from the same place, so each sits on its line.
+inline bool g_espSnapCenter = false;
 inline bool g_espBones      = false;
 inline bool g_espHealth     = true;
 inline bool g_espName       = true;
@@ -76,6 +84,8 @@ inline bool g_espDistance   = true;
 inline bool g_espTeamColor  = true;   // different color for same squad
 inline bool g_espTeammates  = false;  // draw squadmates too (off = enemies only)
 inline bool g_espSelf       = false;  // draw a box on yourself
+// The sonar and the off-screen pins never show spectators; the ESP when asked.
+inline bool g_espSpectators = false;
 inline int  g_espAlpha      = 170;    // opacity of boxes and lines (0-255).
 inline float g_boxHeadroom  = 0.07f;
 // Outline width in pixels for boxes, bones and snaplines.
@@ -96,6 +106,7 @@ inline int   g_aimBone      = 1;      // 0 head, 1 chest, 2 body, 3 legs
 inline float g_aimSmooth    = 1.2f;   // 1 = instant snap, higher = slower pull
 inline float g_aimFovPx     = 301.f;  // only engage within N px of the crosshair
 inline float g_aimMaxDist   = 111.f;  // metres
+inline bool  g_aimIgnoreSpectators = true;   // aim and trigger pass over them
 inline int   g_aimTargetCnt = 0;      // diagnostics for the menu
 
 inline float g_aimHeadLift  = 0.045f;
@@ -189,6 +200,30 @@ inline bool  g_sonarRings   = true;    // range rings and the cross
 inline bool  g_sonarLock    = false;   // stop the mouse moving or resizing it
 inline float g_sonarX = 60.f, g_sonarY = 60.f;
 inline float g_sonarW = 260.f, g_sonarH = 260.f;
+
+// ── off-screen indicators: a pin for each player the ESP cannot show, on a ring
+// around the crosshair or along the window's edge, pointing the way they are.
+// The radius slider's top. From there on the pins run along the window's edge.
+inline constexpr float kOofRadiusEdge = 1200.f;
+inline bool  g_oofEnabled    = true;
+inline float g_oofRadius     = kOofRadiusEdge;   // ring radius around the crosshair, px
+inline float g_oofSize       = 20.f;    // pin radius up close, px
+inline float g_oofMaxDist    = 40.f;    // metres; nobody further gets a pin
+inline bool  g_oofScaleDist  = true;    // far pins drawn smaller
+inline int   g_oofAlpha      = 155;     // opacity of everything the pins draw
+inline int   g_oofFarAlpha   = 140;     // share of that left at the max distance, of 255
+inline bool  g_oofLetters    = true;    // L / M / H inside the pin
+inline bool  g_oofDistance   = true;    // distance behind the pin
+inline bool  g_oofHeight     = true;    // a marker for players well above or below
+inline float g_oofHeightM    = 4.f;     // metres of height difference that counts
+inline bool  g_oofHealth     = true;    // health as a band around the pin
+inline bool  g_oofTeammates  = false;
+// Close-range warning: the pin flickers neon green inside this distance, faster
+// the closer they get.
+inline bool  g_oofFlash      = true;
+inline float g_oofFlashDist  = 30.f;    // metres
+inline float g_oofFlashMinHz = 0.8f;    // at the edge of that distance
+inline float g_oofFlashMaxHz = 14.9f;   // point blank
 
 // ── menu window (size and opacity, both persisted)
 inline int   g_menuAlpha = 225;   // background opacity of the settings window

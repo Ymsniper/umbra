@@ -292,14 +292,14 @@ inline bool offsetsSane() {
         if (!none.empty())
             printf("[offsets] off: %s (no %s)\n", what, none.c_str());
     };
-    feature("hiding spectators",
+    feature("the game's spectator flag, so only a missing health marks a spectator",
             {{"APlayerState_Spectator", g_off.APlayerState_Spectator}});
     if (!g_off.APlayerState_Squad &&
         !(g_off.ADiscoveryCharacter_Squad && g_off.Squad_Index))
         printf("[offsets] off: squads, so squadmates are drawn and aimed at like "
                "anyone else (no APlayerState_Squad, and no ADiscoveryCharacter_Squad "
                "with Squad_Index)\n");
-    feature("health bars and skipping the dead",
+    feature("health bars, skipping the dead and spotting spectators by missing health",
             {{"ADiscoveryCharacter_Health", g_off.ADiscoveryCharacter_Health},
              {"Health_A", g_off.Health_A}, {"Health_B", g_off.Health_B}});
     feature("the visibility check, so everyone counts as visible",

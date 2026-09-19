@@ -12,6 +12,7 @@
 #include "structs.hpp"
 #include <raylib.h>
 #include "colors.hpp"
+#include "offscreen.hpp"
 #include <rlgl.h>
 #include <cstdio>
 #include <cmath>
@@ -63,6 +64,7 @@ inline void drawEntity(const Font& font, const EntityData& ent,
     if (!ent.valid) { if (dbg) printf("[draw] SKIP: ent.valid == false\n"); return; }
     if (ent.isSelf     && !g_espSelf)      return;
     if (ent.isTeammate && !g_espTeammates) return;
+    if (ent.isSpectator && !g_espSpectators) return;
 
     Vec2 sRoot;
     if (!worldToScreen(vp, ent.origin, sRoot, sw, sh)) {
@@ -189,10 +191,14 @@ inline void drawEntity(const Font& font, const EntityData& ent,
             // Snapline from the bottom centre of the screen. A thin distant box
             // is easy to miss; a line to it is not, and it makes misalignment
             // obvious immediately.
-            if (g_espSnaplines)
-                DrawLineEx(Vector2{(float)sw * 0.5f, (float)sh},
-                           Vector2{cx, head.y + h2f},
-                           std::max(1.f, thick * 0.6f), colA);
+            if (g_espSnaplines) {
+                const Vector2 from = g_espSnapCenter
+                                   ? Vector2{(float)sw * 0.5f, (float)sh * 0.5f}
+                                   : Vector2{(float)sw * 0.5f, (float)sh};
+                const Vector2 to   = g_espSnapCenter ? Vector2{cx, head.y + h2f * 0.5f}
+                                                     : Vector2{cx, head.y + h2f};
+                DrawLineEx(from, to, std::max(1.f, thick * 0.6f), colA);
+            }
 
             // health bar on the left side
             if (g_espHealth && ent.maxHealth > 0) {
@@ -417,6 +423,10 @@ inline void renderFrame(const Font& font)
         }
         for (int i = 0; i < g_entityCount; i++)
             drawEntity(font, g_entities[i], vp, sw, sh);
+        // After the boxes, so a pin is never drawn under one.
+        oof::draw(font, g_entities, g_entityCount, vi, vp, sw, sh,
+                  std::chrono::duration<double>(
+                      std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
     // aim assist
@@ -456,6 +466,7 @@ inline void renderFrame(const Font& font)
         for (int i = 0; i < g_entityCount; i++) {
             const EntityData& e = g_entities[i];
             if (!e.valid || e.isSelf || e.isTeammate) continue;   // never squadmates
+            if (e.isSpectator && g_aimIgnoreSpectators) continue;  // nobody there
             if (visFilter && !e.visible) continue;                  // behind cover
             if (e.distance > g_aimMaxDist) continue;
 

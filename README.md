@@ -151,11 +151,15 @@ adapts to any resolution.
 ```bash
 ./run.sh                # finds the game PID by itself
 ./run.sh 12345          # or give it one
-./run.sh -q             # quiet: a few status lines only
+./run.sh -q             # quiet: a few status lines only, no update check
 ```
 
 Start it whenever you like, including at the menu. It re-resolves its objects
 when a match begins or ends, so it does not need restarting between rounds.
+
+On start it also asks GitHub whether a newer release is out, and if there is one
+it says so, with a link. It never downloads or changes anything, and the tool
+does not wait for the answer.
 
 ### Controls
 
@@ -179,6 +183,38 @@ distinguish teams, and a master opacity slider governs everything drawn.
 
 The skeleton is composed from the mesh's own bone hierarchy, so it follows the
 animation rather than approximating from a capsule.
+
+Spectators are left out. The game lists them with the players, but they carry
+no health, so a box on one reads 0 HP, and the game never draws them, so there
+is nothing to see or hit. A switch in the ESP tab shows them anyway. The sonar
+and the off-screen pins never do, and the aim assist and triggerbot pass over
+them unless told otherwise in the Aim tab.
+
+### Off-screen indicators
+
+Anyone behind you, beside you or past the edge of the screen gets a pin along
+the window's edge, in their squad's colour, pointing their way. In front
+of you a pin points exactly where the player projects onto your view, through
+the same projection as the ESP's boxes and lines. Behind you it goes by bearing,
+so someone straight behind you is straight down and the pin holds still. Each
+pin holds the player's class (L, M or H), with a band round its back for their
+health, the distance behind it, and a small up or down marker when they are a
+floor or more above or below you. Far pins are smaller and fainter.
+
+With snaplines drawn from the crosshair (a switch beside Snaplines in the ESP
+tab), every pin sits on its own player's line. Players in nearly the same
+direction get their pins nudged apart, just far enough that neither the pins
+nor their distances overlap.
+
+Ring radius starts at its top, where the pins run along the window's border.
+Lower, they sit on a ring around the crosshair instead, one that flattens
+against the edges of the screen where it would cross them.
+
+Inside a set distance the pin flickers neon green, faster the closer the player
+gets, while its rim keeps the squad's colour. Radius, size, range, opacity, the
+flicker distance and its slowest and fastest rates are all in the menu's
+Off-screen tab. Opacity sets how solid the whole indicator is, flicker and text
+included, and Far opacity how much of that the farthest pins keep.
 
 ### Aim assist
 

@@ -30,7 +30,7 @@ int sonarMain(SharedState* sh);
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.4.5";
+static constexpr const char*    kUmbraVersion = "1.5.0";
 static constexpr const char*    kProcName   = "Discovery-d.exe";
 static constexpr const char*    kModuleName = "Discovery-d.exe";
 static constexpr int            kWindowW    = 1920;
@@ -84,6 +84,7 @@ static void publishStatus(SharedState* sh) {
 
 // Enemy positions relative to the local player, plus which way it is facing.
 // Squadmates are deliberately absent: the sonar is for what you cannot see.
+// Spectators too: there is nobody there to see.
 static void publishSonar(SharedState* sh) {
     SonarFrame f;
     {
@@ -99,7 +100,7 @@ static void publishSonar(SharedState* sh) {
         std::lock_guard<std::mutex> lk(g_entityMtx);
         for (int i = 0; i < g_entityCount && f.count < kSharedBlips; i++) {
             const EntityData& e = g_entities[i];
-            if (!e.valid || e.isSelf || e.isTeammate) continue;
+            if (!e.valid || e.isSelf || e.isTeammate || e.isSpectator) continue;
             SonarBlip& b = f.blips[f.count++];
             b.dx    = (float)(e.origin.X - me.X);
             b.dy    = (float)(e.origin.Y - me.Y);

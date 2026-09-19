@@ -53,6 +53,10 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Checkbox("Boxes",       &g_espBoxes);
         ImGui::Checkbox("Skeleton",    &g_espSkeleton);
         ImGui::Checkbox("Snaplines",   &g_espSnaplines);
+        if (g_espSnaplines) {
+            ImGui::SameLine();
+            ImGui::Checkbox("from crosshair", &g_espSnapCenter);
+        }
         ImGui::Checkbox("Health",      &g_espHealth);
         ImGui::Checkbox("Names",       &g_espName);
         ImGui::Checkbox("Distance",    &g_espDistance);
@@ -60,6 +64,8 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Spacing();
         ImGui::Checkbox("Show squadmates", &g_espTeammates);
         ImGui::Checkbox("Show self",       &g_espSelf);
+        ImGui::Checkbox("Show spectators", &g_espSpectators);
+        ImGui::SameLine(); ImGui::TextDisabled("(0 health, the game never draws them)");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::SliderInt("Opacity",       &g_espAlpha, 30, 255);
@@ -76,6 +82,59 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::SliderFloat("FOV scale", &g_fovScale, 0.70f, 1.60f, "%.3f");
         ImGui::TextDisabled("game FOV %.1f -> drawn at %.1f",
                             st.camFov, st.camFov * g_fovScale);
+        ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Off-screen")) {
+        ImGui::Checkbox("Enabled##oof", &g_oofEnabled);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(pins toward players off the screen)");
+        if (!g_oofEnabled) ImGui::BeginDisabled();
+
+        // At the top the pins leave the ring for the window's own edge.
+        ImGui::SliderFloat("Ring radius", &g_oofRadius, 60.f, kOofRadiusEdge,
+                           g_oofRadius >= kOofRadiusEdge ? "window edge" : "%.0f px");
+        ImGui::SameLine();
+        ImGui::TextDisabled(g_oofRadius >= kOofRadiusEdge ? "(along the border)"
+                                                          : "(max = window edge)");
+        ImGui::SliderFloat("Pin size", &g_oofSize, 8.f, 40.f, "%.0f px");
+        ImGui::SliderFloat("Max distance##oof", &g_oofMaxDist, 10.f, 300.f, "%.0f m");
+        // The reader stops listing players at the ESP's own max distance, so
+        // nothing past it can get a pin either.
+        if (g_oofMaxDist > g_maxEspDist) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(ESP stops at %.0f m)", g_maxEspDist);
+        }
+        ImGui::Checkbox("Smaller when far", &g_oofScaleDist);
+        ImGui::SliderInt("Opacity##oof", &g_oofAlpha, 10, 255);
+        ImGui::SameLine(); ImGui::TextDisabled("(all of it, flicker included)");
+        ImGui::SliderInt("Far opacity", &g_oofFarAlpha, 0, 255);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d%% of Opacity at max distance)", g_oofFarAlpha * 100 / 255);
+
+        ImGui::Separator();
+        ImGui::TextDisabled("On each pin");
+        ImGui::Checkbox("Class letter", &g_oofLetters);
+        ImGui::SameLine(); ImGui::TextDisabled("(L / M / H)");
+        ImGui::Checkbox("Distance behind it", &g_oofDistance);
+        ImGui::Checkbox("Height marker", &g_oofHeight);
+        ImGui::SameLine(); ImGui::TextDisabled("(above / below you)");
+        if (g_oofHeight)
+            ImGui::SliderFloat("Counts from", &g_oofHeightM, 1.f, 20.f, "%.1f m");
+        ImGui::Checkbox("Health band", &g_oofHealth);
+        ImGui::Checkbox("Show squadmates##oof", &g_oofTeammates);
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Close-range warning");
+        ImGui::Checkbox("Neon flicker", &g_oofFlash);
+        if (g_oofFlash) {
+            ImGui::SliderFloat("Starts at", &g_oofFlashDist, 3.f, 100.f, "%.0f m");
+            ImGui::SliderFloat("Slowest", &g_oofFlashMinHz, 0.5f, 10.f, "%.1f /s");
+            ImGui::SliderFloat("Fastest", &g_oofFlashMaxHz, 1.f, 20.f, "%.1f /s");
+            if (g_oofFlashMaxHz < g_oofFlashMinHz) g_oofFlashMaxHz = g_oofFlashMinHz;
+            ImGui::TextDisabled("Speeds up steadily as they close in.");
+        }
+        if (!g_oofEnabled) ImGui::EndDisabled();
         ImGui::EndTabItem();
     }
 
@@ -142,6 +201,8 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Checkbox("Show FOV circle", &g_aimShowFov);
         ImGui::Checkbox("Scale FOV by distance", &g_aimDistFov);
         ImGui::SliderFloat("Max distance##aim", &g_aimMaxDist, 10.f, 300.f, "%.0f m");
+        ImGui::Checkbox("Ignore spectators", &g_aimIgnoreSpectators);
+        ImGui::SameLine(); ImGui::TextDisabled("(aim and trigger)");
 
         ImGui::Separator();
         ImGui::TextDisabled("Head offset");

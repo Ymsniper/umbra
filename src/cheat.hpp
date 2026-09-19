@@ -1319,23 +1319,28 @@ inline void readerThread(uintptr_t UWorld2f) {
         // Why does a roster of 12 become one box? Six `continue`s can drop a
         // player and none of them said so. Count each: the answer is which
         // number is 11, not a guess about which offset moved.
-        int dropNoPs = 0, dropSpec = 0, dropNoPawn = 0, dropNoRoot = 0,
+        int dropNoPs = 0, dropNoPawn = 0, dropNoRoot = 0,
             dropZeroPos = 0, dropDist = 0, dropDead = 0;
+        bool noHealth[kMaxEntities] = {};
+        int healthRead = 0;
 
         for (int i = 0; i < playerCount && count < kMaxEntities; i++) {
             uintptr_t ps = psArr[i];
             if (!ps) { dropNoPs++; continue; }
 
+            bool spectator = false;
             if (hideSpectators) {
                 uint8_t flags = mem.read<uint8_t>(ps + g_off.APlayerState_Spectator);
-                if (flags & (1 << 1)) { dropSpec++; continue; }
+                spectator = (flags & (1 << 1)) != 0;
             }
 
             uintptr_t pawn = mem.readPtr(ps + g_off.APlayerState_PawnPrivate);
             if (!pawn) { dropNoPawn++; continue; }
 
             EntityData& ent = tempEnts[count];
+            ent.id     = ps;
             ent.isSelf = (pawn == ackpawn);
+            ent.isSpectator = spectator;
 
             uintptr_t root = mem.readPtr(pawn + g_off.AActor_RootComponent);
             if (!root) { dropNoRoot++; continue; }
@@ -1390,17 +1395,24 @@ inline void readerThread(uintptr_t UWorld2f) {
             // Health: two adjacent floats, the smaller of them the current one
             uintptr_t hc = (g_off.ADiscoveryCharacter_Health && g_off.Health_A && g_off.Health_B)
                          ? mem.readPtr(pawn + g_off.ADiscoveryCharacter_Health) : 0;
+            bool hasHealth = false;
             if (hc) {
                 float a = mem.read<float>(hc + g_off.Health_A);
                 float b = mem.read<float>(hc + g_off.Health_B);
                 if (std::isfinite(a) && std::isfinite(b) &&
                     a >= 0.f && b >= 0.f && a <= 1000.f && b <= 1000.f) {
+                    hasHealth = true;
+                    healthRead++;
                     ent.health    = (a < b) ? a : b;     // current is the smaller
                     ent.maxHealth = (a < b) ? b : a;
                     if (ent.maxHealth <= 0.0) ent.maxHealth = 100.0;
                     if (ent.health <= 0.0) { dropDead++; continue; }
                 }
             }
+            // The slot may still hold a player dropped just before, whose
+            // numbers would stand in for the ones that could not be read.
+            if (!hasHealth) { ent.health = 0.0; ent.maxHealth = 100.0; }
+            noHealth[count] = !hasHealth;
 
             // Squad. Who is a squadmate comes from the squad actor, which needs no
             // number to be right. The colour needs the game's own number for the
@@ -1448,6 +1460,17 @@ inline void readerThread(uintptr_t UWorld2f) {
             count++;
         }
 
+        // A pawn with no health on it is a spectator's: the game never draws
+        // it, nothing can hit it, and its box reads 0 health. The dead are gone
+        // already, their health read as zero. When nobody's health could be
+        // read at all, the reads are what failed, not the players, and nobody
+        // is taken for a spectator.
+        int specs = 0;
+        for (int k = 0; k < count; k++) {
+            if (healthRead > 0 && noHealth[k]) tempEnts[k].isSpectator = true;
+            if (tempEnts[k].isSpectator && !tempEnts[k].isSelf) specs++;
+        }
+
         // An empty screen has to say why without a debug build. While players
         // are listed and none is left to draw, print what removed them, again
         // every half minute while it lasts, and say when there is someone.
@@ -1455,9 +1478,10 @@ inline void readerThread(uintptr_t UWorld2f) {
         // every pawn has alike makes the whole lobby one squad, and this line
         // is where that shows.
         {
-            int mates = 0, others = 0;
+            int mates = 0, others = 0, selves = 0;
             for (int k = 0; k < count; k++) {
-                if (tempEnts[k].isSelf) continue;
+                if (tempEnts[k].isSelf) { selves++; continue; }
+                if (tempEnts[k].isSpectator) continue;
                 others++;
                 if (tempEnts[k].isTeammate) mates++;
             }
@@ -1468,11 +1492,11 @@ inline void readerThread(uintptr_t UWorld2f) {
             if (empty && !s_empty) s_since = t0;
             if (empty && t0 - s_since > std::chrono::seconds(2) &&
                 (!s_told || t0 - s_said > std::chrono::seconds(30))) {
-                printf("[ents] %d in the player list, none to draw. dropped: spectator "
-                       "%d, no pawn %d, no root %d, at origin %d, past max_esp_dist %d, "
-                       "dead %d, empty slot %d. kept but not drawn: squadmate %d, "
-                       "you %d\n", playerCount, dropSpec, dropNoPawn, dropNoRoot,
-                       dropZeroPos, dropDist, dropDead, dropNoPs, mates, count - others);
+                printf("[ents] %d in the player list, none to draw. dropped: no pawn "
+                       "%d, no root %d, at origin %d, past max_esp_dist %d, dead %d, "
+                       "empty slot %d. kept but not drawn: squadmate %d, spectator %d, "
+                       "you %d\n", playerCount, dropNoPawn, dropNoRoot, dropZeroPos,
+                       dropDist, dropDead, dropNoPs, mates, specs, selves);
                 s_said = t0;
                 s_told = true;
             }
@@ -1487,9 +1511,9 @@ inline void readerThread(uintptr_t UWorld2f) {
             static const bool eDbg = getenv("ESP_DEBUG") != nullptr;
             static int dbgN = 0;
             if (eDbg && (dbgN++ % 120) == 0)
-                printf("[ents] roster %d -> kept %d   dropped: noPS %d  spectator %d  "
+                printf("[ents] roster %d -> kept %d (spectators %d)   dropped: noPS %d  "
                        "noPawn %d  noRoot %d  zeroPos %d  tooFar %d  dead %d\n",
-                       playerCount, count, dropNoPs, dropSpec, dropNoPawn,
+                       playerCount, count, specs, dropNoPs, dropNoPawn,
                        dropNoRoot, dropZeroPos, dropDist, dropDead);
         }
 
