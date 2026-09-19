@@ -23,10 +23,18 @@ for a in "$@"; do
 done
 
 if [ -t 1 ]; then
-    RED=$'\033[0;31m'; YEL=$'\033[0;33m'; GRN=$'\033[0;32m'
-    DIM=$'\033[2m';    OFF=$'\033[0m'
+    YEL=$'\033[0;33m'; GRN=$'\033[0;32m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+    # The banner wears the menu's accent, #7cffa8: exactly where the terminal
+    # takes 24-bit colour, else the nearest of 256, else plain bright green.
+    case "${COLORTERM:-}" in
+        truecolor|24bit) MINT=$'\033[38;2;124;255;168m' ;;
+        *) case "${TERM:-}" in
+               *256color*) MINT=$'\033[38;5;121m' ;;
+               *)          MINT=$'\033[92m' ;;
+           esac ;;
+    esac
 else
-    RED=''; YEL=''; GRN=''; DIM=''; OFF=''
+    YEL=''; GRN=''; DIM=''; OFF=''; MINT=''
 fi
 
 # ---- update check ------------------------------------------------------------
@@ -63,7 +71,7 @@ if [ "$QUIET" = 0 ]; then
     check_update &
 fi
 
-[ -f "$HERE/banner.txt" ] && printf '%s%s%s\n' "$RED" "$(cat "$HERE/banner.txt")" "$OFF"
+[ -f "$HERE/banner.txt" ] && printf '%s%s%s\n' "$MINT" "$(cat "$HERE/banner.txt")" "$OFF"
 
 # ---- kernel module state -----------------------------------------------------
 # Read /proc/modules rather than piping lsmod into grep: a matching `grep -q`

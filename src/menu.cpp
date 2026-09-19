@@ -14,6 +14,55 @@
 #include <unistd.h>
 #include <signal.h>
 
+// One accent, #7cffa8 on near black, shared with the banner run.sh prints, so
+// the launcher and the menu read as one tool.
+static const ImVec4 kAccent(0.486f, 1.000f, 0.659f, 1.0f);
+
+static ImVec4 accent(float a) { return ImVec4(kAccent.x, kAccent.y, kAccent.z, a); }
+
+static void applyTheme() {
+    ImVec4* c = ImGui::GetStyle().Colors;
+    c[ImGuiCol_Text]                      = ImVec4(0.812f, 0.910f, 0.863f, 1.00f);
+    c[ImGuiCol_TextDisabled]              = ImVec4(0.435f, 0.502f, 0.475f, 1.00f);
+    c[ImGuiCol_WindowBg]                  = ImVec4(0.016f, 0.027f, 0.039f, 1.00f);
+    c[ImGuiCol_PopupBg]                   = ImVec4(0.027f, 0.043f, 0.051f, 0.97f);
+    c[ImGuiCol_Border]                    = accent(0.20f);
+    c[ImGuiCol_FrameBg]                   = accent(0.07f);
+    c[ImGuiCol_FrameBgHovered]            = accent(0.15f);
+    c[ImGuiCol_FrameBgActive]             = accent(0.24f);
+    c[ImGuiCol_ScrollbarBg]               = ImVec4(0.f, 0.f, 0.f, 0.20f);
+    c[ImGuiCol_ScrollbarGrab]             = accent(0.22f);
+    c[ImGuiCol_ScrollbarGrabHovered]      = accent(0.36f);
+    c[ImGuiCol_ScrollbarGrabActive]       = accent(0.52f);
+    c[ImGuiCol_CheckMark]                 = kAccent;
+    c[ImGuiCol_SliderGrab]                = accent(0.62f);
+    c[ImGuiCol_SliderGrabActive]          = kAccent;
+    c[ImGuiCol_Button]                    = accent(0.10f);
+    c[ImGuiCol_ButtonHovered]             = accent(0.24f);
+    c[ImGuiCol_ButtonActive]              = accent(0.38f);
+    c[ImGuiCol_Header]                    = accent(0.12f);
+    c[ImGuiCol_HeaderHovered]             = accent(0.24f);
+    c[ImGuiCol_HeaderActive]              = accent(0.36f);
+    c[ImGuiCol_Separator]                 = accent(0.22f);
+    c[ImGuiCol_SeparatorHovered]          = accent(0.45f);
+    c[ImGuiCol_SeparatorActive]           = kAccent;
+    c[ImGuiCol_ResizeGrip]                = accent(0.12f);
+    c[ImGuiCol_ResizeGripHovered]         = accent(0.35f);
+    c[ImGuiCol_ResizeGripActive]          = accent(0.60f);
+    c[ImGuiCol_InputTextCursor]           = kAccent;
+    c[ImGuiCol_Tab]                       = accent(0.06f);
+    c[ImGuiCol_TabHovered]                = accent(0.28f);
+    c[ImGuiCol_TabSelected]               = accent(0.18f);
+    c[ImGuiCol_TabSelectedOverline]       = kAccent;
+    c[ImGuiCol_TabDimmed]                 = accent(0.04f);
+    c[ImGuiCol_TabDimmedSelected]         = accent(0.12f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = accent(0.50f);
+    c[ImGuiCol_TextLink]                  = kAccent;
+    c[ImGuiCol_TextSelectedBg]            = accent(0.30f);
+    c[ImGuiCol_DragDropTarget]            = kAccent;
+    c[ImGuiCol_NavCursor]                 = kAccent;
+}
+
 static void drawSettingsPanel(const Status& st) {
     // The panel fills the window; the window itself is what the user moves and
     // resizes, so ImGui does not draw a second set of chrome inside it.
@@ -28,20 +77,20 @@ static void drawSettingsPanel(const Status& st) {
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // Header: name, and the two facts worth seeing without opening a tab.
-    ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "UMBRA");
+    ImGui::TextColored(kAccent, "UMBRA");
     ImGui::SameLine();
     ImGui::TextDisabled("| %d entities", st.entityCount);
     if (g_aimEnabled) {
         ImGui::SameLine();
         ImGui::TextColored(st.aimSuppressed ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f)
-                           : st.aimHeld       ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
+                           : st.aimHeld       ? kAccent
                                              : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                            st.aimSuppressed ? "| aim released"
                            : st.aimHeld     ? "| AIM" : "| aim");
     }
     if (g_trigEnabled) {
         ImGui::SameLine();
-        ImGui::TextColored(st.trigOnTarget ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
+        ImGui::TextColored(st.trigOnTarget ? kAccent
                                           : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                            st.trigOnTarget ? "| TRIG" : "| trig");
     }
@@ -217,7 +266,7 @@ static void drawSettingsPanel(const Status& st) {
         if (st.aimSuppressed)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  released (shot)");
         else
-            ImGui::TextColored(st.aimHeld ? ImVec4(0.4f, 1.0f, 0.5f, 1.0f)
+            ImGui::TextColored(st.aimHeld ? kAccent
                                          : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                                st.aimHeld ? "  pulling" : "  idle");
         ImGui::EndTabItem();
@@ -265,7 +314,7 @@ static void drawSettingsPanel(const Status& st) {
         else if (!st.trigHeld)
             ImGui::TextDisabled("waiting for the activate button");
         else if (st.trigOnTarget)
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f),
+            ImGui::TextColored(kAccent,
                                "ON TARGET   off %.1f / tol %.1f px",
                                st.trigOnTargetPx, st.trigOnTargetTol);
         else
@@ -345,7 +394,7 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Separator();
         ImGui::TextDisabled("Memory");
         if (st.usingKmod) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f),
+            ImGui::TextColored(kAccent,
                                "kernel module   %llu reads",
                                (unsigned long long)st.kmodOk);
             if (st.kmodFellBack)
@@ -361,7 +410,7 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Spacing();
         ImGui::TextDisabled("Mouse");
         if (st.vmouseKernel)
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f),
+            ImGui::TextColored(kAccent,
                                "kernel injection, real pointer");
         else if (st.vmouseReady)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
@@ -423,6 +472,7 @@ int menuMain(SharedState* sh) {
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     rlImGuiSetup(true);
+    applyTheme();
     // Same separate factors as the overlay: raylib's default alpha blend uses
     // the source alpha on the alpha channel too, which would make the panel
     // fade out faster than the opacity asked for.
