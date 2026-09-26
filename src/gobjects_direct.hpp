@@ -1,145 +1,169 @@
 #pragma once
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Ymsniper
-// Decodes the game's obfuscated FUObjectArray so every live object
-// can be enumerated without scanning the heap.
+// Reaches the engine's object array, so every live object can be found by
+// reading rather than by searching memory for it.
+//
+// The game hides the array's address, and the arithmetic it hides it behind has
+// changed with every patch: inlined word shuffles and a rotate, a called
+// routine mixing with carry-less multiplication, an inline xor, rotate and add.
+// Carrying constants for one of those shapes means a patch leaves this decoding
+// garbage until someone reads the new instructions.
+//
+// So no shape is assumed here. The update tool finds the instructions the game
+// itself reaches its object array with, proves them by walking the array, and
+// writes them to gobjects.code beside offsets.cfg, with the register to read
+// afterwards. This runs those bytes.
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <sstream>
+#include <string>
 #include <vector>
 #include "mem.hpp"
+#include "gobjemu.hpp"
 #include "runtime_offsets.hpp"
 
-// GObjects, by the arithmetic the game's own decode routine performs.
-//
-// The module holds the array's address as a 128-bit value, and the game passes
-// it to a helper with two keys:
-//
-//     value = clmul(KeyA, clmul(KeyB, G.low) ^ G.high) ^ G.low
-//
-// where clmul is a carry-less multiply and only the low half of each product is
-// kept, which is what PCLMULQDQ with an immediate of zero leaves in the low
-// quadword. Every constant here comes from offsets.cfg, because every one of
-// them is read out of the game's instructions by the update tool: the keys and
-// the global at the call sites, the member offsets and their keys at the reads
-// that follow, and the entry layout from the objects themselves. Nothing is
-// carried over from a previous build, so a patch that changes any of it is a
-// re-derivation rather than a silent wrong answer.
-
 struct GObjectsView {
-    uintptr_t base    = 0;      // the decoded FUObjectArray
     uintptr_t chunks  = 0;      // the chunk pointer array
-    int32_t   count   = 0;      // NumElements
+    int32_t   count   = 0;      // NumElements, where the code held one
     bool      ok      = false;
 };
 
 namespace godirect {
 
-inline uint64_t clmulLo(uint64_t a, uint64_t b) {
-    uint64_t r = 0;
-    while (b) {
-        if (b & 1) r ^= a;
-        a <<= 1;
-        b >>= 1;
+// What the update tool wrote: where the instructions sit, the instructions, and
+// what to read once they have run.
+struct CodeRecipe {
+    uintptr_t rva = 0;
+    int chunksReg = -1, countReg = -1;
+    uintptr_t entryBase = 0, stride = 0, indexOff = 0;
+    int chunkShift = 0;
+    std::vector<unsigned char> code;
+    bool ok = false;
+};
+
+// Beside offsets.cfg: the working directory, or one level up when the binary is
+// launched from its build directory.
+inline std::string recipePath() {
+    for (const char* c : {"gobjects.code", "../gobjects.code"}) {
+        std::ifstream probe(c);
+        if (probe) return c;
     }
-    return r;
+    return "gobjects.code";
 }
 
-inline bool haveKeys() {
-    return g_off.GObjects_RVA && g_off.GObjects_KeyA && g_off.GObjects_KeyB &&
-           g_off.GObjects_NumKey && g_off.GObjects_ObjKey && g_off.GObjects_Stride &&
-           g_off.GObjects_ChunkShift;
+inline const CodeRecipe& recipe() {
+    static CodeRecipe r = [] {
+        CodeRecipe out;
+        std::ifstream f(recipePath());
+        if (!f) return out;
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            const size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+            while (!k.empty() && isspace((unsigned char)k.back())) k.pop_back();
+            while (!v.empty() && isspace((unsigned char)v.front())) v.erase(v.begin());
+            while (!v.empty() && isspace((unsigned char)v.back())) v.pop_back();
+            if (k == "rva") out.rva = strtoull(v.c_str(), nullptr, 0);
+            else if (k == "chunks_reg") out.chunksReg = atoi(v.c_str());
+            else if (k == "count_reg") out.countReg = atoi(v.c_str());
+            else if (k == "entry_base") out.entryBase = strtoull(v.c_str(), nullptr, 0);
+            else if (k == "stride") out.stride = strtoull(v.c_str(), nullptr, 0);
+            else if (k == "index_off") out.indexOff = strtoull(v.c_str(), nullptr, 0);
+            else if (k == "chunk_shift") out.chunkShift = atoi(v.c_str());
+            else if (k == "code") {
+                for (size_t i = 0; i + 1 < v.size(); i += 2)
+                    out.code.push_back((unsigned char)strtoul(v.substr(i, 2).c_str(), nullptr, 16));
+            }
+        }
+        out.ok = out.rva && out.chunksReg >= 0 && out.stride && out.chunkShift &&
+                 !out.code.empty();
+        return out;
+    }();
+    return r;
 }
 
 inline GObjectsView resolve(const Mem& mem) {
     GObjectsView g;
-    if (!haveKeys()) return g;
+    const CodeRecipe& r = recipe();
+    if (!r.ok) return g;
 
-    unsigned char raw[16];
-    if (!mem.read_raw(mem.modbase + g_off.GObjects_RVA, raw, sizeof raw)) return g;
-    uint64_t lo, hi;
-    memcpy(&lo, raw, 8);
-    memcpy(&hi, raw + 8, 8);
-    if (!lo && !hi) return g;
-    const uint64_t x = clmulLo((uint64_t)g_off.GObjects_KeyB, lo) ^ hi;
-    g.base = (uintptr_t)(clmulLo((uint64_t)g_off.GObjects_KeyA, x) ^ lo);
+    // The instructions are run where the game runs them, so anything they load
+    // relative to the instruction pointer lands on the right address.
+    EmuState st;
+    Emu emu(mem);
+    emu.run(r.code.data(), r.code.size(), mem.modbase + r.rva, st);
+    if (st.unsupported || !st.gpr[r.chunksReg].known) return g;
 
-    if (g.base < 0x10000 || g.base > 0x7FFFFFFFFFFFull || (g.base & 7)) { g.base = 0; return g; }
-
-    g.count = (int32_t)__builtin_bswap32(
-        mem.read<uint32_t>(g.base + g_off.GObjects_NumOff) ^ (uint32_t)g_off.GObjects_NumKey);
-    g.chunks = (uintptr_t)__builtin_bswap64(
-        mem.read<uint64_t>(g.base + g_off.GObjects_ObjOff) ^ (uint64_t)g_off.GObjects_ObjKey);
-
-    if (g.count < 100 || g.count > 20000000) return g;
-    if (!g.chunks || (g.chunks & 7)) return g;
+    g.chunks = st.gpr[r.chunksReg].lo;
+    if (!g.chunks || (g.chunks & 7) || g.chunks > 0x7FFFFFFFFFFFull) { g.chunks = 0; return g; }
+    if (r.countReg >= 0 && st.gpr[r.countReg].known) g.count = (int32_t)st.gpr[r.countReg].lo;
+    if (g.count < 100 || g.count > 20000000) g.count = 0;      // walk the chunks instead
     g.ok = true;
     return g;
 }
 
-// entry = chunks[idx >> ChunkShift] + EntryBase + (idx & mask) * Stride
+// entry = chunks[idx >> shift] + base + (idx & mask) * stride
 inline uintptr_t objectAt(const Mem& mem, const GObjectsView& g, int32_t idx) {
-    if (!g.ok || idx < 0 || idx >= g.count) return 0;
-    const int32_t per = 1 << g_off.GObjects_ChunkShift;
-    uintptr_t chunk = mem.readPtr(g.chunks + (uintptr_t)(idx / per) * 8);
+    const CodeRecipe& r = recipe();
+    if (!g.ok || idx < 0 || (g.count && idx >= g.count)) return 0;
+    const int32_t per = 1 << r.chunkShift;
+    const uintptr_t chunk = mem.readPtr(g.chunks + (uintptr_t)(idx / per) * 8);
     if (!chunk) return 0;
-    return mem.readPtr(chunk + g_off.GObjects_EntryBase + (uintptr_t)(idx % per) * g_off.GObjects_Stride);
+    return mem.readPtr(chunk + r.entryBase + (uintptr_t)(idx % per) * r.stride);
 }
 
-// Every object pointer, read in BLOCKS.
-inline void allObjects(const Mem& mem, const GObjectsView& g,
-                       std::vector<uintptr_t>& out) {
+// Every object pointer, read in blocks. Where the code held no count, the
+// chunks are walked until one is missing.
+inline void allObjects(const Mem& mem, const GObjectsView& g, std::vector<uintptr_t>& out) {
     out.clear();
     if (!g.ok) return;
-    out.reserve(size_t(g.count));
-    const int32_t perChunk = 1 << g_off.GObjects_ChunkShift;
-    const int32_t nChunks = (g.count + perChunk - 1) / perChunk;
-    const uintptr_t stride = g_off.GObjects_Stride;
+    const CodeRecipe& r = recipe();
+    const int32_t perChunk = 1 << r.chunkShift;
+    const int32_t nChunks = g.count ? (g.count + perChunk - 1) / perChunk : 64;
     std::vector<unsigned char> blk;
     for (int32_t c = 0; c < nChunks; c++) {
-        uintptr_t chunk = mem.readPtr(g.chunks + uintptr_t(c) * 8);
-        if (!chunk) continue;
-        int32_t first = c * perChunk;
-        int32_t n = g.count - first;
-        if (n > perChunk) n = perChunk;
-        size_t bytes = size_t(n) * stride + g_off.GObjects_EntryBase;
+        const uintptr_t chunk = mem.readPtr(g.chunks + (uintptr_t)c * 8);
+        if (!chunk || (chunk & 7)) break;
+        int32_t n = perChunk;
+        if (g.count) {
+            n = g.count - c * perChunk;
+            if (n > perChunk) n = perChunk;
+            if (n <= 0) break;
+        }
+        const size_t bytes = (size_t)n * r.stride + r.entryBase;
         blk.resize(bytes);
         size_t got = 0;
         if (!mem.read_raw_partial(chunk, blk.data(), bytes, got) ||
-            got < g_off.GObjects_EntryBase + stride)
-            continue;
-        size_t usable = (got - g_off.GObjects_EntryBase) / stride;
+            got < r.entryBase + r.stride)
+            break;
+        const size_t usable = (got - r.entryBase) / r.stride;
         for (size_t i = 0; i < usable; i++) {
             uintptr_t o;
-            memcpy(&o, blk.data() + g_off.GObjects_EntryBase + i * stride, sizeof(o));
+            memcpy(&o, blk.data() + r.entryBase + i * r.stride, sizeof o);
             out.push_back(o);
-        }
-        // Both paths index the same entries, so a disagreement means one of
-        // them has the entry layout wrong and everything read through it
-        // belongs to something else.
-        if (c == 0 && usable > 4) {
-            for (int t = 0; t < 4; t++) {
-                uintptr_t viaOne = objectAt(mem, g, t);
-                uintptr_t viaBlk = out[size_t(t)];
-                if (viaOne != viaBlk) {
-                    printf("[gobjects] READ PATHS DISAGREE at index %d: "
-                           "objectAt 0x%lx  block 0x%lx\n",
-                           t, (unsigned long)viaOne, (unsigned long)viaBlk);
-                    break;
-                }
-            }
         }
     }
 }
 
+// The object at index i has to report index i, which is what the update tool
+// accepted these instructions on, checked again here against the running game.
 inline bool verify(const Mem& mem, const GObjectsView& g, int samples = 64) {
-    if (!g.ok || !g_off.GObjects_IndexOff) return false;
+    const CodeRecipe& r = recipe();
+    if (!g.ok || !r.indexOff) return false;
     int agree = 0, tested = 0;
-    for (int i = 0; i < samples && i < g.count; i++) {
-        uintptr_t o = objectAt(mem, g, i);
+    for (int i = 0; i < samples; i++) {
+        const uintptr_t o = objectAt(mem, g, i);
         if (!o || !mem.vtableInModule(mem.readPtr(o))) continue;
         tested++;
-        if (mem.read<int32_t>(o + g_off.GObjects_IndexOff) == i) agree++;
+        if (mem.read<int32_t>(o + r.indexOff) == i) agree++;
     }
     return tested >= 8 && agree >= tested * 9 / 10;
 }

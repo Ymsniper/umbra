@@ -1,0 +1,11 @@
+# The instructions this build reaches its object array with, read out of
+# the game and proved by index correspondence. Run them, then read the
+# registers named below. Re-derived by the update tool after every patch.
+rva = 0x37A41C
+chunks_reg = 9
+count_reg = -1
+entry_base = 0x8
+stride = 0x18
+index_off = 0xC
+chunk_shift = 16
+code = 4883EC604157415641554154565755534883EC284889CE8B410CF30F7E05D29F1810660FEF051AAE9A0C660F6FC8660F72D10F660F72F011660FEBC1660FFE0510AE9A0C66480F7EC1BA2C80C84A3351140FCA39C27E3E0FB7D049B84169B9BC37F472264C33412849B94169B9BCAE9E282B4D31C1490FC9

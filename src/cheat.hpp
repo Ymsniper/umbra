@@ -482,20 +482,30 @@ inline CamFit cameraIsOurs(const Mem& mem, uintptr_t cam, uintptr_t pawn) {
 }
 
 inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
-    if (!g_off.GObjects_RVA) return 0;
+    if (!godirect::recipe().ok) {
+        static bool said = false;
+        if (!said)
+            printf("[gobjects] %s, so the player is searched for by sweeping the heap "
+                   "instead. The update tool writes that file beside offsets.cfg.\n",
+                   godirect::recipe().code.empty()
+                       ? "no instructions for reaching the object array were found"
+                       : "the instructions beside offsets.cfg are incomplete");
+        said = true;
+        return 0;
+    }
     GObjectsView g = godirect::resolve(mem);
     if (!g.ok) {
-        printf("[gobjects] global at modbase+0x%lX did not decode -- "
-               "falling back to the sweep\n", (unsigned long)g_off.GObjects_RVA);
+        printf("[gobjects] the instructions in %s no longer reach the object array -- "
+               "falling back to the sweep\n", godirect::recipePath().c_str());
         return 0;
     }
     if (!godirect::verify(mem, g)) {
-        printf("[gobjects] decoded 0x%lx but index correspondence FAILED -- "
-               "not trusting it\n", (unsigned long)g.base);
+        printf("[gobjects] chunks 0x%lx but index correspondence FAILED -- "
+               "not trusting it\n", (unsigned long)g.chunks);
         return 0;
     }
-    printf("[gobjects] 0x%lx  %d objects  (no heap sweep)\n",
-           (unsigned long)g.base, g.count);
+    printf("[gobjects] chunks 0x%lx  %d objects  (no heap sweep)\n",
+           (unsigned long)g.chunks, g.count);
 
     auto looksReal = [&](uintptr_t ctrl, uintptr_t pawn) -> bool {
         // a controller owns a PlayerState
@@ -528,7 +538,7 @@ inline uintptr_t findLocalControllerViaGObjects(const Mem& mem) {
     bool stale = objs.empty() ||
                  std::chrono::duration_cast<std::chrono::milliseconds>(
                      nowT - lastEnum).count() > 3000 ||
-                 std::abs(g.count - lastCount) > 2048;
+                 (g.count && std::abs(g.count - lastCount) > 2048);
     if (stale) {
         godirect::allObjects(mem, g, objs);
         lastEnum = nowT;

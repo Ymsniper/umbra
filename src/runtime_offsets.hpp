@@ -18,13 +18,6 @@ struct RuntimeOffsets {
     // ---- verified by a closed two-hop cycle -------------------------------
  // ---- the GEngine chain: every live object by pointer, no heap sweep -------
     uintptr_t GEngine_RVA                 = 0x0;   // static; NEVER FOUND on this build
-    uintptr_t GObjects_RVA                = 0x0;   // the 128-bit module global
-    uintptr_t GObjects_KeyA               = 0x0;   // the caller's first key
-    uintptr_t GObjects_KeyB               = 0x0;   // the caller's second key
-    uintptr_t GObjects_NumKey             = 0x0;   // NumElements XOR, bswapped
-    uintptr_t GObjects_ObjKey             = 0x0;   // Objects XOR, bswapped
-    uintptr_t GObjects_NumOff             = 0x0;   // NumElements member offset
-    uintptr_t GObjects_ObjOff             = 0x0;   // Objects member offset
     uintptr_t GObjects_EntryBase          = 0x0;   // object pointer inside an entry
     uintptr_t GObjects_Stride             = 0x0;   // bytes per entry
     uintptr_t GObjects_IndexOff           = 0x0;   // where an object holds its index
@@ -124,13 +117,6 @@ inline RuntimeOffsets g_off;
 inline std::map<std::string, uintptr_t*> offsetFields(RuntimeOffsets& o) {
     return {
         {"GEngine_RVA",                  &o.GEngine_RVA},
-        {"GObjects_RVA",                 &o.GObjects_RVA},
-        {"GObjects_KeyA",                &o.GObjects_KeyA},
-        {"GObjects_KeyB",                &o.GObjects_KeyB},
-        {"GObjects_NumKey",              &o.GObjects_NumKey},
-        {"GObjects_ObjKey",              &o.GObjects_ObjKey},
-        {"GObjects_NumOff",              &o.GObjects_NumOff},
-        {"GObjects_ObjOff",              &o.GObjects_ObjOff},
         {"GObjects_EntryBase",           &o.GObjects_EntryBase},
         {"GObjects_Stride",              &o.GObjects_Stride},
         {"GObjects_IndexOff",            &o.GObjects_IndexOff},
@@ -334,10 +320,11 @@ inline bool offsetsSane() {
             {{"AGameStateBase_WorldTime", g_off.AGameStateBase_WorldTime}});
     feature("checking the local controller's PlayerState",
             {{"AController_PlayerState", g_off.AController_PlayerState}});
+    // The instructions that reach the object array live in gobjects.code, which
+    // the update tool writes beside this file; these two describe what they
+    // lead to once they have run.
     feature("the object array, so the heap is swept to find the player",
-            {{"GObjects_RVA", g_off.GObjects_RVA},
-             {"GObjects_KeyA", g_off.GObjects_KeyA},
-             {"GObjects_KeyB", g_off.GObjects_KeyB},
+            {{"GObjects_Stride", g_off.GObjects_Stride},
              {"GObjects_ChunkShift", g_off.GObjects_ChunkShift}});
     return true;
 }

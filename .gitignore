@@ -9,5 +9,8 @@ build/
 Module.symvers
 modules.order
 
+# The object array, derived per game build by the update tool, is TRACKED:
+# a clone without it silently falls back to sweeping the heap.
+
 # ImGui window positions, written at runtime
 imgui.ini
