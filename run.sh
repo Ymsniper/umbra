@@ -96,10 +96,10 @@ echo
 cd "$HERE/build" || { echo "no build/ directory; run ./build.sh first"; exit 1; }
 
 if [ -z "$PID" ]; then
-    PID=$(grep -rl 'Discovery-d.exe' /proc/*/maps 2>/dev/null \
+    PID=$(grep -rlE 'Discovery(-d)?\.exe' /proc/*/maps 2>/dev/null \
           | head -1 | cut -d/ -f3)
     [ -n "$PID" ] && [ "$(cat /proc/$PID/comm 2>/dev/null)" = "GameThread" ] || {
-        for p in $(grep -rl 'Discovery-d.exe' /proc/*/maps 2>/dev/null | cut -d/ -f3); do
+        for p in $(grep -rlE 'Discovery(-d)?\.exe' /proc/*/maps 2>/dev/null | cut -d/ -f3); do
             [ "$(cat /proc/$p/comm 2>/dev/null)" = "GameThread" ] && PID=$p && break
         done
     }

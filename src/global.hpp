@@ -4,6 +4,7 @@
 // State shared between the reader and render threads, and the
 // runtime values the menu edits.
 #include "structs.hpp"
+#include "visibility.hpp"
 #include <cstdint>
 #include <atomic>
 #include <chrono>
@@ -20,6 +21,9 @@ struct EntityData {
     // Collision-capsule half height, straight from the game. Exact per class,
     // so the box needs no per-rig guessing. 0 = unavailable.
     float     capsuleHalf = 0.f;
+    // The collision capsule's radius, which the engine keeps in the four bytes
+    // after its half-height. The game's own statement of how wide this class is.
+    float     capsuleRadius = 0.f;
     FVector   headWorld;
     FVector   feetWorld;
     // The player state's address: the same player for the whole match, across
@@ -45,7 +49,8 @@ struct EntityData {
     // UPrimitiveComponent::LastRenderTime for this player's mesh, and the
     // verdict derived from it. `visible` is only meaningful when the offset has
     // been derived; with the offset 0 it stays true so nothing is filtered out.
-    float   lastRenderTime = 0.f;
+    float   lastRenderTime = 0.f;   // the stamp being believed, engine seconds
+    vis::Sample renderStamps{};     // and its neighbours, for deciding which
     bool    visible   = true;
     FVector velocity{};
     int     rigCount  = 0;
@@ -115,19 +120,29 @@ inline float g_aimHeadLift  = 0.045f;
 
 // ── the skeleton, as ONE feature
 inline bool  g_espSkeleton  = false;
+// The body's own silhouette, traced from its mesh (body.hpp, outline.hpp).
+inline bool  g_espOutline      = false;
+inline float g_espOutlineWidth = 2.0f;   // the band's width in pixels
+inline int   g_espOutlineFill  = 40;     // how much colour shows inside, of 255
+inline int   g_outlineTubes    = 0;      // runtime: players outlined from tubes
 // and not for normal use. See render.hpp.
 inline float g_aimTargetBias = 1.0f;
 
 inline bool  g_aimSticky     = true;
 inline float g_aimStickiness = 1.35f;   // challenger must be this much better
 inline int   g_aimLockedIdx  = -1;      // runtime, not a setting
+// Which player the aim is holding, by the player itself rather than by its
+// place in the list. The list is rebuilt every frame and its order changes
+// whenever anyone is dropped from it, so a slot is not a player: holding one by
+// slot quietly starts holding whoever moved into it.
+inline uintptr_t g_aimLockedId = 0;
 
 inline bool  g_aimDistFov    = true;
 // Draw the aim FOV as a ring around the crosshair. The radius is a number in
 // the menu and a guess in play; showing it makes the setting concrete.
 inline bool  g_aimShowFov     = false;
 
-inline int   g_aimSmoothMode = 0;
+inline int   g_aimSmoothMode = 0;   // 0 divisor, 1 inertia
 inline float g_aimInertia    = 0.40f;
 inline float g_aimInertiaAccX = 0.f, g_aimInertiaAccY = 0.f;   // runtime
 
@@ -183,7 +198,21 @@ inline bool  g_trigOnTarget    = false;  // runtime: is the crosshair on target 
 inline bool   g_visHave        = false;  // offset present AND calibrated
 inline float  g_visMaxSeen     = 0.f;    // highest LastRenderTime observed
 inline double g_visMaxWall     = 0.0;
-inline float  g_visTolerance   = 0.12f;  // seconds of slack before "hidden"
+// How stale a stamp may be before a player counts as hidden. It used to have
+// to cover for a drifting clock as well as for the engine, which is why it was
+// most of a tenth of a second; now it only has to cover the frame or two
+// between the engine drawing and this reading the result.
+inline float  g_visTolerance   = 0.05f;  // seconds of slack before "hidden"
+// The game's own frame, from the world when it can be read and from how far the
+// stamps jump when it cannot. Two of these is the least slack the verdict takes.
+inline float  g_visFrameMs     = 0.f;
+inline float  g_visTolMs       = 0.f;    // the slack actually used, setting or floor
+// The overlay's size, which the reader needs to know how wide the view is.
+inline std::atomic<int> g_viewW{0}, g_viewH{0};
+inline int    g_visOutOfView   = 0;      // runtime: fresh stamps on players out of view
+inline bool   g_visWorldClock  = false;  // timed by the world's own clock
+inline int    g_visFieldOff    = 0;      // runtime: which stamp is being read
+inline bool   g_visFieldSure   = false;
 inline int    g_visVisibleCnt  = 0;      // diagnostics for the menu
 inline int    g_visHiddenCnt   = 0;
 inline bool   g_aimVisibleOnly = false;  // aimbot: skip players behind cover
@@ -198,6 +227,13 @@ inline float g_trigSizeScale   = 1.0f;   // 0 = pure pixels, 1 = true part size
 inline float g_trigMinTol      = 2.0f;
 inline float g_trigOnTargetTol = 0.f;    // runtime: the tolerance used this frame
 inline float g_trigOnTargetPx  = 0.f;    // runtime: measured offset this frame
+// Test the shot against the body's own mesh when it has been read, and against
+// the tubes only when it has not.
+inline bool  g_trigMesh        = true;
+inline bool  g_trigUsedMesh    = false;  // runtime: the last test was the mesh
+inline int   g_bodyShown       = 0;      // runtime: players posed this frame
+inline int   g_bodyBuilt       = 0;      // runtime: meshes read
+inline int   g_bodyRefused     = 0;      // runtime: meshes that did not fit
 
 // ── sonar: a live top-down view of where the enemies are, in a window of its
 // own so it can sit anywhere, including on a second screen.

@@ -35,6 +35,11 @@ struct RuntimeOffsets {
 
     // ---- verified live ----------------------------------------------------
     uintptr_t UWorld_NetDriver            = 0x0;
+    // How anything reaches the world: every component holds it.
+    uintptr_t UActorComponent_World       = 0x0;   // UActorComponent::WorldPrivate
+    uintptr_t UWorld_TimeSeconds          = 0x0;   // double, what LastRenderTime is stamped from
+    uintptr_t PlayerController_Player     = 0x0;   // APlayerController::Player, the local player
+
     uintptr_t UWorld_Levels               = 0x0;
     uintptr_t AController_PlayerState     = 0x0;
     uintptr_t AController_ControlRotation = 0x0;   // FRotator, 3 doubles
@@ -110,6 +115,35 @@ struct RuntimeOffsets {
     // ---- squad / team, through the component on the pawn ------------------
     uintptr_t ADiscoveryCharacter_Squad   = 0x0;   // USquadComponent*
     uintptr_t Squad_Index                 = 0x0;   // int32
+
+    // ---- the render data of a mesh, for drawing an outline -----------------
+    uintptr_t SkeletalMesh_RenderData     = 0x0;
+    uintptr_t RenderData_LODRenderData    = 0x0;
+    uintptr_t LOD_PositionBuffer          = 0x0;
+    uintptr_t PosBuffer_Data              = 0x0;
+    uintptr_t PosBuffer_Stride            = 0x0;
+    uintptr_t PosBuffer_NumVertices       = 0x0;
+    uintptr_t LOD_SkinWeightBuffer        = 0x0;
+    uintptr_t LOD_RenderSections          = 0x0;
+    uintptr_t Section_BaseVertexIndex     = 0x0;
+    uintptr_t Section_NumVertices         = 0x0;
+    uintptr_t Section_BoneMap             = 0x0;
+    uintptr_t SkeletalMesh_RefBasesInvMatrix = 0x0;
+
+    // ---- what the renderer remembers, for asking whether it drew someone ---
+    uintptr_t LocalPlayer_ViewStates      = 0x0;
+    uintptr_t ViewState_Occlusion         = 0x0;
+    uintptr_t Primitive_ComponentId       = 0x0;
+
+    // ---- the world's collision bodies, for a line of sight -----------------
+    uintptr_t UWorld_PhysicsScene         = 0x0;
+    uintptr_t ChaosScene_SceneSolver      = 0x0;
+    // The solver's own step to its particles cannot be split from the
+    // particles' step to the static ones, because the first is inline: only
+    // their sum is a thing memory can show, so the sum is what is written.
+    uintptr_t Solver_StaticParticles      = 0x0;
+    uintptr_t Particles_WorldBounds       = 0x0;
+    uintptr_t Particles_HasBounds         = 0x0;
 };
 
 inline RuntimeOffsets g_off;
@@ -131,6 +165,29 @@ inline std::map<std::string, uintptr_t*> offsetFields(RuntimeOffsets& o) {
         {"AController_Pawn",             &o.AController_Pawn},
         {"APawn_Controller",             &o.APawn_Controller},
         {"UWorld_NetDriver",             &o.UWorld_NetDriver},
+        {"UActorComponent_World",        &o.UActorComponent_World},
+        {"UWorld_TimeSeconds",           &o.UWorld_TimeSeconds},
+        {"PlayerController_Player",      &o.PlayerController_Player},
+        {"LocalPlayer_ViewStates",       &o.LocalPlayer_ViewStates},
+        {"ViewState_Occlusion",          &o.ViewState_Occlusion},
+        {"Primitive_ComponentId",        &o.Primitive_ComponentId},
+        {"UWorld_PhysicsScene",          &o.UWorld_PhysicsScene},
+        {"ChaosScene_SceneSolver",       &o.ChaosScene_SceneSolver},
+        {"Solver_StaticParticles",       &o.Solver_StaticParticles},
+        {"Particles_WorldBounds",        &o.Particles_WorldBounds},
+        {"Particles_HasBounds",          &o.Particles_HasBounds},
+        {"SkeletalMesh_RenderData",      &o.SkeletalMesh_RenderData},
+        {"RenderData_LODRenderData",     &o.RenderData_LODRenderData},
+        {"LOD_PositionBuffer",           &o.LOD_PositionBuffer},
+        {"PosBuffer_Data",               &o.PosBuffer_Data},
+        {"PosBuffer_Stride",             &o.PosBuffer_Stride},
+        {"PosBuffer_NumVertices",        &o.PosBuffer_NumVertices},
+        {"LOD_SkinWeightBuffer",         &o.LOD_SkinWeightBuffer},
+        {"LOD_RenderSections",           &o.LOD_RenderSections},
+        {"Section_BaseVertexIndex",      &o.Section_BaseVertexIndex},
+        {"Section_NumVertices",          &o.Section_NumVertices},
+        {"Section_BoneMap",              &o.Section_BoneMap},
+        {"SkeletalMesh_RefBasesInvMatrix",  &o.SkeletalMesh_RefBasesInvMatrix},
         {"UWorld_Levels",                &o.UWorld_Levels},
         {"AController_PlayerState",      &o.AController_PlayerState},
         {"AController_ControlRotation",  &o.AController_ControlRotation},

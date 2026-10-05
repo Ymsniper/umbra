@@ -175,8 +175,10 @@ does not wait for the answer.
 | `HOME` | Toggle the aim assist. |
 | `End` | Quit, with the overlay focused. `Ctrl-C` in the terminal also works. |
 
-Settings are edited in the menu and saved to `settings.cfg` when the tool exits,
-so it comes back the way you left it.
+Settings are edited in the menu and written to `settings.cfg` a few seconds
+after they stop changing, as well as on exit, so a crash or a kill costs
+nothing. The file is replaced whole rather than rewritten in place, and the
+previous contents are kept once as `settings.cfg.bak`.
 
 ---
 
@@ -190,6 +192,13 @@ distinguish teams, and a master opacity slider governs everything drawn.
 
 The skeleton is composed from the mesh's own bone hierarchy, so it follows the
 animation rather than approximating from a capsule.
+
+The **outline** traces each player's own silhouette in their squad's colour, so
+an arm held out, a crouch or a lean shows as it is, where a box only shows how
+tall someone is. It comes from the mesh the game renders, posed on the live
+skeleton, when the mesh's vertices can be read, and otherwise from tubes laid
+along the bones and proportioned from that player's own build. Its width, and
+how much colour fills the body, are set beside it in the ESP tab.
 
 Spectators are left out. The game lists them with the players, but they carry
 no health, so a box on one reads 0 HP, and the game never draws them, so there
@@ -276,29 +285,57 @@ Pulls toward a target while the chosen mouse button is held.
 ### Triggerbot
 <img width="910" height="404" alt="trigger" src="https://github.com/user-attachments/assets/f3b43775-d6e3-41c6-b5f9-bb093ab83bc5" />
 
-Fires when the crosshair is on target.
+Fires when the shot would land. A crosshair is a direction, not a dot, so the
+test is the one the game itself runs: the line from the camera through the
+crosshair, against the player's body.
 
-* With the aim assist **active**, it fires only when the crosshair has reached
-  the exact point the aim is pulling toward.
-* On its **own**, it works from the skeleton (a chosen bone, or any
-  bone), or from the capsule box.
-* **Tolerance scales with the target's on-screen size**, so one setting behaves
-  the same point-blank and across the map. A fixed pixel tolerance cannot: at
-  range a few pixels span a whole head, up close they are a sliver of one.
+* **The body** is the mesh the game draws, posed on the live skeleton, when its
+  vertices can be read, and otherwise tubes laid along the bones, sized from
+  each player's own hip-to-head length. Either way an arm held out is where it
+  is, and the gap between someone's legs is a miss.
+* With the aim assist **active**, it fires only on the player the aim is pulling
+  toward, and only on the part it is aiming at.
+* On its **own**, it fires on whoever the line reaches first: a chosen part
+  (head, chest, body or legs), or anywhere on them.
+* **Forgiveness is in pixels**, which is an angle, so a setting means the same
+  thing point-blank and across the map.
+* **Moving players are led** by the same prediction as the aim, since the pose
+  being tested is already a frame or two old.
 * **Arm delay** (after the button goes down), **reaction delay** (after the
   crosshair lands), **click duration** and **cooldown** are all adjustable.
 
 ### Visibility
+
+The engine decides what to draw every frame and stamps each mesh with the time
+it last drew it, so reading that stamp answers whether a player can be seen far
+better than anything computed from outside: it is the same answer the game acted
+on, occlusion, culling and blown-open walls included.
+
+* **The clock.** A stamp means nothing without the engine's own clock, which
+  pauses, is dilated and restarts between rounds. It is read from the world
+  itself, the clock the stamps are written from, and only believed while the two
+  agree; without that offset the newest stamp anyone carries stands in for it.
+* **The slack.** The game writes a stamp a frame or so after its clock has moved
+  on, and the tool reads at a rate of its own, so a player counts as drawn for
+  at least two of the game's own frames, measured as it runs. The tolerance
+  slider can ask for more than that, never less.
+* **Out of view.** Someone outside your view cannot be on your screen, so a fresh
+  stamp on them was drawn for something else, their shadow for one, and they
+  count as hidden.
+* **Steady.** A verdict has to hold for two frames before it changes, so a
+  player in a doorway does not flicker between seen and hidden.
+
 <img width="910" height="249" alt="visibility" src="https://github.com/user-attachments/assets/5f4dfb99-9d1b-4498-93db-89cb16cc9709" />
 
 Players who are not currently being drawn by the game are crossed out and faded,
 and the aim assist and triggerbot can each be told to ignore them.
 
-This is derived from the engine's own render timestamp, so it is conservative by
-nature: the game culls on a bounding box, which is larger than the player, and
-occlusion queries lag a frame or two. Expect an enemy to be marked visible
-slightly before he fully clears a corner. The tolerance slider controls how
-quickly someone drops out of visible after breaking line of sight.
+It is conservative by nature. The game draws a player whenever their bounding
+box is not wholly hidden, and that box is larger than the player, so someone
+just behind a corner or a low wall can still read as visible, and occlusion lags
+a frame or two. The engine also keeps a second stamp meant for being drawn on
+screen alone; the tool looks for it among the neighbouring fields, and the
+Visibility tab says which stamp it is reading.
 
 ---
 
@@ -344,20 +381,32 @@ build.sh              build script
 run.sh                launcher
 banner.txt            startup banner
 offsets.cfg           game offsets (required)
+gobjects.code         the game's own instructions that reach the object array
 CMakeLists.txt
 src/
   main.cpp              entry point, overlay window, render loop
+  menu.cpp              the settings window, a process of its own
+  sonar.cpp             the sonar window, a process of its own
+  shared.hpp            settings and status shared with those two
   mem.hpp               process memory reads
   cheat.hpp             reader thread, entity list
-  render.hpp            ESP drawing, aim assist, triggerbot, menu
+  render.hpp            ESP drawing, aim assist, triggerbot
+  offscreen.hpp         off-screen indicators
+  outline.hpp           the outline: the body's mask and the edge traced round it
+  body.hpp              a player's mesh, read once and posed on the live bones
+  hitbox.hpp            the shot's line against tubes along the bones
+  visibility.hpp        render stamps, the engine's clock, the view test
   global.hpp            state shared between reader and render threads
   structs.hpp           engine types and world-to-screen projection
   skeleton.hpp          bone hierarchy composition
   settings.hpp          settings.cfg load and save
-  vmouse.hpp            mouse output
+  vmouse.hpp, .cpp      mouse output
+  x11_overlay.hpp, .cpp the overlay window and input under X11
+  colors.hpp, font.hpp  drawing helpers
   offsets.hpp           fixed engine layout constants
   runtime_offsets.hpp   offsets.cfg loader
   gobjects_direct.hpp   object array decoding
+  gobjemu.hpp           runs the instructions in gobjects.code
 kmod/
   suite_kmod.c          kernel module: memory reads and mouse injection
   suite_kmod.h          shared ioctl contract
@@ -393,7 +442,8 @@ DISPLAY=:0 WAYLAND_DISPLAY= ./run.sh
 ```
 
 **Game not found**: pass the PID directly. Under Proton the process is
-`Discovery-d.exe` and the correct thread is `GameThread`.
+`Discovery.exe` (`Discovery-d.exe` on older builds) and the correct thread is
+`GameThread`.
 
 **Nothing drawn during a match**: offsets are stale after a game update.
 

@@ -15,6 +15,7 @@
 
 #include <raylib.h>
 #include <rlgl.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -30,9 +31,22 @@ int sonarMain(SharedState* sh);
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.5.3";
-static constexpr const char*    kProcName   = "Discovery-d.exe";
-static constexpr const char*    kModuleName = "Discovery-d.exe";
+static constexpr const char*    kUmbraVersion = "1.6.0";
+// The game's executable has shipped under both of these names. Whichever one
+// the running game maps is the one whose encrypted decoy image has to be told
+// apart from the real one.
+static constexpr const char*    kGameNames[] = { "Discovery.exe", "Discovery-d.exe" };
+
+static const char* gameNameIn(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/maps", (int)pid);
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line))
+        for (const char* n : kGameNames)
+            if (line.find(n) != std::string::npos) return n;
+    return kGameNames[0];
+}
 static constexpr int            kWindowW    = 1920;
 static constexpr int            kWindowH    = 1080;
 
@@ -72,8 +86,18 @@ static void publishStatus(SharedState* sh) {
     st.aimHeld         = g_aimHeld       ? 1 : 0;
     st.aimSuppressed   = g_aimSuppressed ? 1 : 0;
     st.aimKillPaused   = g_aimKillPaused ? 1 : 0;
+    st.visFieldOff     = (int8_t)g_visFieldOff;
+    st.visFieldSure    = g_visFieldSure ? 1 : 0;
+    st.visFrameMs      = g_visFrameMs;
+    st.visTolMs        = g_visTolMs;
+    st.visWorldClock   = g_visWorldClock ? 1 : 0;
     st.trigHeld        = g_trigHeld      ? 1 : 0;
     st.trigOnTarget    = g_trigOnTarget  ? 1 : 0;
+    st.trigUsedMesh    = g_trigUsedMesh  ? 1 : 0;
+    st.bodyShown       = g_bodyShown;
+    st.outlineTubes    = g_outlineTubes;
+    st.bodyBuilt       = g_bodyBuilt;
+    st.bodyRefused     = g_bodyRefused;
     st.visHave         = g_visHave       ? 1 : 0;
     st.haveLastRenderTime = g_off.Mesh_LastRenderTime ? 1 : 0;
     st.usingKmod       = g_mem.usingKmod()      ? 1 : 0;
@@ -137,19 +161,21 @@ int main(int argc, char* argv[]) {
     pid_t forced_pid = parseForcedPID(argc, argv);
     auto tryAttach = [&]() -> bool {
         if (forced_pid > 0)
-            return g_mem.initByPID(forced_pid, kModuleName);
-        return g_mem.init(kProcName, kModuleName);
+            return g_mem.initByPID(forced_pid, gameNameIn(forced_pid));
+        for (const char* n : kGameNames)
+            if (g_mem.init(n, n)) return true;
+        return false;
     };
 
     if (!tryAttach()) {
         if (forced_pid > 0) {
-            printf("[main] PID %d: module '%s' not found in maps.\n", forced_pid, kModuleName);
+            printf("[main] PID %d: the game's image was not found in its maps.\n", forced_pid);
             printf("[main] Is the game running and is the PID correct?\n");
             return 1;
         }
-        printf("[main] Waiting for %s ...\n", kProcName);
+        printf("[main] Waiting for %s or %s ...\n", kGameNames[0], kGameNames[1]);
         printf("[main] Under Proton/Wine, use --pid or GAME_PID= if this loops forever.\n");
-        printf("[main]   grep -rl '%s' /proc/*/maps 2>/dev/null | head -5\n", kModuleName);
+        printf("[main]   grep -rlE 'Discovery(-d)?\\.exe' /proc/*/maps 2>/dev/null | head -5\n");
         while (g_running && !tryAttach())
             std::this_thread::sleep_for(std::chrono::seconds(2));
         if (!g_running) return 1;
@@ -356,6 +382,26 @@ int main(int argc, char* argv[]) {
             if (g_sonarEnabled) publishSonar(shared);
         }
 
+        // Settings are only as safe as the last time they were written, and a
+        // tool that goes down with the game never reaches the write at the end.
+        // Anything changed here or in the menu is put on disk a few seconds
+        // later instead, once it has stopped changing.
+        {
+            static uint64_t seen = settingsFingerprint();
+            static auto changedAt = std::chrono::steady_clock::now();
+            static bool pending = false;
+            const uint64_t now = settingsFingerprint();
+            const auto t = std::chrono::steady_clock::now();
+            if (now != seen) {
+                seen = now;
+                changedAt = t;
+                pending = true;
+            } else if (pending && t - changedAt > std::chrono::seconds(3)) {
+                saveSettings();
+                pending = false;
+            }
+        }
+
         BeginDrawing();
             ClearBackground(BLANK);               // transparent, not black
             BeginBlendMode(BLEND_CUSTOM_SEPARATE);
@@ -369,6 +415,7 @@ int main(int argc, char* argv[]) {
     // 7. Cleanup
     g_running = false;
     if (reader.joinable()) reader.join();
+    body::shutdown();        // a mesh mid-read must finish before memory goes
     if (shared) {
         // Let each publish any last edit and go. Never an unbounded wait: a
         // child that does not answer must not keep the overlay alive.
@@ -389,6 +436,7 @@ int main(int argc, char* argv[]) {
     }
     saveSettings();          // come back next launch the way the user left it
     if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);
+    outline::unload();       // its mask and shader belong to the window's context
     CloseWindow();
     ovl::shutdown();
 

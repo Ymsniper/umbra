@@ -9,7 +9,9 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
+#include <unistd.h>
 
 // Menu settings that survive a restart.
 
@@ -62,6 +64,9 @@ inline std::map<std::string, SettingRef> settingFields() {
         {"aim_button",     {SettingRef::INT,   &g_aimButton}},
         {"aim_bone",       {SettingRef::INT,   &g_aimBone}},
         {"esp_skeleton",   {SettingRef::BOOL,  &g_espSkeleton}},
+        {"esp_outline",       {SettingRef::BOOL,  &g_espOutline}},
+        {"esp_outline_width", {SettingRef::FLOAT, &g_espOutlineWidth}},
+        {"esp_outline_fill",  {SettingRef::INT,   &g_espOutlineFill}},
         {"aim_smooth",     {SettingRef::FLOAT, &g_aimSmooth}},
         {"aim_fov_px",     {SettingRef::FLOAT, &g_aimFovPx}},
         {"aim_max_dist",   {SettingRef::FLOAT, &g_aimMaxDist}},
@@ -87,6 +92,7 @@ inline std::map<std::string, SettingRef> settingFields() {
         {"trig_skel_part", {SettingRef::INT,   &g_trigSkelPart}},
         {"trig_size_scale",{SettingRef::FLOAT, &g_trigSizeScale}},
         {"trig_min_tol",   {SettingRef::FLOAT, &g_trigMinTol}},
+        {"trig_mesh",      {SettingRef::BOOL,  &g_trigMesh}},
         {"aim_predict",    {SettingRef::BOOL,  &g_aimPredict}},
         {"aim_lead_ms",    {SettingRef::FLOAT, &g_aimLeadMs}},
         {"aim_curve",      {SettingRef::BOOL,  &g_aimCurve}},
@@ -160,14 +166,48 @@ inline bool loadSettings(const char* path = nullptr) {
         }
         n++;
     }
+    // A settings file from a build that had a third aiming mode, the human
+    // hand, can still ask for it; inertia is the nearest of the two left.
+    if (g_aimSmoothMode < 0 || g_aimSmoothMode > 1) g_aimSmoothMode = 1;
     printf("[settings] loaded %d value(s) from %s\n", n, path);
     return n > 0;
 }
 
+// Everything the settings are worth, as one number. Cheap enough to take every
+// frame, which is what says whether anything needs writing.
+inline uint64_t settingsFingerprint() {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    for (auto& kv : settingFields()) {
+        switch (kv.second.kind) {
+            case SettingRef::BOOL:  { const int v = *(bool*)kv.second.p ? 1 : 0; mix(&v, sizeof v); break; }
+            case SettingRef::INT:   mix(kv.second.p, sizeof(int));   break;
+            case SettingRef::FLOAT: mix(kv.second.p, sizeof(float)); break;
+        }
+    }
+    return h;
+}
+
+// Written beside the file and renamed over it. A plain write truncates first,
+// so a tool killed mid-write leaves nothing at all, which is worse than
+// leaving yesterday's settings. The previous contents are kept once, so a
+// session that went wrong can be undone by hand.
 inline bool saveSettings(const char* path = nullptr) {
-    if (!path) path = settingsPath().c_str();
-    std::ofstream f(path);
-    if (!f) return false;
+    const std::string target = path ? std::string(path) : settingsPath();
+    const std::string tmp    = target + ".new";
+    FILE* fp = fopen(tmp.c_str(), "w");
+    if (!fp) return false;
+    {
+        std::ifstream prev(target, std::ios::binary);
+        if (prev) {
+            std::ofstream bak(target + ".bak", std::ios::binary);
+            bak << prev.rdbuf();
+        }
+    }
+    std::ostringstream f;
     f << "# TheFinals menu settings. Delete this file to go back to defaults.\n";
     for (auto& kv : settingFields()) {
         char buf[128];
@@ -184,6 +224,12 @@ inline bool saveSettings(const char* path = nullptr) {
         }
         f << buf;
     }
-    printf("[settings] saved to %s\n", path);
+    const std::string out = f.str();
+    const bool ok = fwrite(out.data(), 1, out.size(), fp) == out.size();
+    fflush(fp);
+    fsync(fileno(fp));
+    fclose(fp);
+    if (!ok) { ::remove(tmp.c_str()); return false; }
+    if (::rename(tmp.c_str(), target.c_str()) != 0) { ::remove(tmp.c_str()); return false; }
     return true;
 }

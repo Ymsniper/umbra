@@ -9,6 +9,7 @@
 #include <rlgl.h>
 #include <imgui.h>
 #include <rlImGui.h>
+#include <algorithm>
 #include <cstdio>
 #include <sys/prctl.h>
 #include <unistd.h>
@@ -103,6 +104,21 @@ static void drawSettingsPanel(const Status& st) {
     if (ImGui::BeginTabItem("ESP")) {
         ImGui::Checkbox("Boxes",       &g_espBoxes);
         ImGui::Checkbox("Skeleton",    &g_espSkeleton);
+        ImGui::Checkbox("Outline",     &g_espOutline);
+        if (g_espOutline) {
+            ImGui::SameLine();
+            // What the outline is drawn from: the mesh where it was read, the
+            // tubes on the bones where it was not.
+            if (st.bodyShown > 0 || st.outlineTubes > 0)
+                ImGui::TextDisabled("(%d from the mesh, %d from the bones)",
+                                    st.bodyShown, st.outlineTubes);
+            else if (st.bodyRefused > 0 && st.bodyBuilt == 0)
+                ImGui::TextDisabled("(mesh not in memory, the bones stand in)");
+            else
+                ImGui::TextDisabled("(nobody to outline)");
+            ImGui::SliderFloat("Outline width", &g_espOutlineWidth, 1.0f, 6.0f, "%.1f px");
+            ImGui::SliderInt("Outline fill", &g_espOutlineFill, 0, 160);
+        }
         ImGui::Checkbox("Snaplines",   &g_espSnaplines);
         if (g_espSnaplines) {
             ImGui::SameLine();
@@ -214,7 +230,8 @@ static void drawSettingsPanel(const Status& st) {
         // The curve shapes the path whatever button drives the aim, so it is
         // not tied to the quick-scope button condition below.
         ImGui::Checkbox("Curved pull", &g_aimCurve);
-        ImGui::SameLine(); ImGui::TextDisabled("(arc instead of a straight line)");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(arc instead of a straight line)");
         if (g_aimCurve) {
             ImGui::SliderFloat("Bow: sideways -> up/down", &g_aimCurveX, 0.5f, 20.f, "%.2f");
             ImGui::SameLine(); ImGui::TextDisabled("(lower = wider)");
@@ -300,18 +317,29 @@ static void drawSettingsPanel(const Status& st) {
         ImGui::Checkbox("Use skeleton##trig", &g_trigSkeleton);
         ImGui::SameLine();
         ImGui::TextDisabled(skelAimActive ? "(uses the aimed bone)"
-                            : g_trigSkeleton ? "(bones)" : "(box)");
+                            : g_trigSkeleton ? "(one part)" : "(whole body)");
         if (g_trigSkeleton) {
             const char* parts[] = { "Head", "Chest", "Body", "Legs", "All body" };
             ImGui::Combo("Shoot on", &g_trigSkelPart, parts, 5);
         }
         if (skelAimActive) ImGui::EndDisabled();
 
+        // The mesh is the body as the game draws it; the tubes stand in until
+        // it has been read, and for any player whose mesh did not fit.
+        ImGui::Checkbox("Use the body's mesh##trig", &g_trigMesh);
+        ImGui::SameLine();
+        ImGui::TextDisabled(!g_trigMesh           ? "(tubes)"
+                          : st.trigUsedMesh       ? "(testing the mesh)"
+                          : st.bodyBuilt > 0      ? "(mesh ready)"
+                          : st.bodyRefused > 0    ? "(mesh did not fit, tubes)"
+                                                  : "(reading the mesh, tubes)");
+
         ImGui::SliderFloat("Size scale", &g_trigSizeScale, 0.0f, 3.0f, "%.2f");
         ImGui::SameLine();
-        ImGui::TextDisabled(g_trigSizeScale <= 0.01f ? "(pixels)" : "(scales w/ range)");
+        ImGui::TextDisabled(g_trigSizeScale <= 0.01f ? "(pixels only)"
+                                                     : "(tubes; 1.00 = true size)");
         ImGui::SliderFloat("Forgiveness (px)", &g_trigForgiveness, 0.0f, 25.0f, "%.1f");
-        ImGui::SliderFloat("Min tolerance (px)", &g_trigMinTol, 0.0f, 8.0f, "%.1f");
+        ImGui::SliderFloat("Min forgiveness (px)", &g_trigMinTol, 0.0f, 8.0f, "%.1f");
         ImGui::SameLine(); ImGui::TextDisabled("(raise if far shots miss)");
 
         ImGui::Separator();
@@ -327,13 +355,13 @@ static void drawSettingsPanel(const Status& st) {
         else if (!st.trigHeld)
             ImGui::TextDisabled("waiting for the activate button");
         else if (st.trigOnTarget)
-            ImGui::TextColored(kAccent,
-                               "ON TARGET   off %.1f / tol %.1f px",
-                               st.trigOnTargetPx, st.trigOnTargetTol);
-        else
+            ImGui::TextColored(kAccent, "ON TARGET   forgiving %.1f px",
+                               st.trigOnTargetTol);
+        else if (st.trigOnTargetPx > 0.f)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
-                               "no target   off %.1f / tol %.1f px",
-                               st.trigOnTargetPx, st.trigOnTargetTol);
+                               "no target   off by %.1f px", st.trigOnTargetPx);
+        else
+            ImGui::TextDisabled("no target   nothing in the way");
         ImGui::EndTabItem();
     }
 
@@ -356,8 +384,31 @@ static void drawSettingsPanel(const Status& st) {
             ImGui::SameLine(); ImGui::TextDisabled("(x opacity)");
             ImGui::SliderFloat("X width", &g_visXThick, 1.f, 8.f, "%.1f px");
         }
-        ImGui::SliderFloat("Tolerance (s)", &g_visTolerance, 0.02f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Tolerance (s)", &g_visTolerance, 0.01f, 0.40f, "%.3f");
         ImGui::SameLine(); ImGui::TextDisabled("(lower drops cover faster)");
+        // A stamp is written by the render thread, a frame or so behind, and it
+        // is read here at a rate of its own, so two of the game's frames is the
+        // least slack the verdict will take whatever the slider says. Showing
+        // the number it actually used says when the slider is being overruled.
+        if (st.visFrameMs > 0.f) {
+            if (st.visTolMs > g_visTolerance * 1000.f + 0.5f)
+                ImGui::TextDisabled("frame %.1f ms, so it waits %.0f ms (two frames)",
+                                    st.visFrameMs, st.visTolMs);
+            else
+                ImGui::TextDisabled("frame %.1f ms, waiting %.0f ms",
+                                    st.visFrameMs, st.visTolMs);
+        }
+        ImGui::TextDisabled(st.visWorldClock ? "timed by the world's own clock"
+                                             : "timed from the newest stamp (no world clock)");
+        // Which of the engine's two stamps is being read: the one for being
+        // drawn at all, or the one for being drawn on your screen.
+        if (st.visFieldSure)
+            ImGui::TextDisabled(st.visFieldOff == 0
+                                ? "reading the only stamp this build keeps"
+                                : "reading the on-screen stamp, %+d from the derived one",
+                                (int)st.visFieldOff);
+        else
+            ImGui::TextDisabled("watching the stamps to see which is on-screen only");
         if (!st.visHave) ImGui::EndDisabled();
         else {
             ImGui::Separator();

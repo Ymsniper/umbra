@@ -13,9 +13,19 @@
 #include <raylib.h>
 #include "colors.hpp"
 #include "offscreen.hpp"
+#include "hitbox.hpp"
+#include "body.hpp"
+#include "outline.hpp"
+#include <map>
+#include <thread>
 #include <rlgl.h>
 #include <cstdio>
 #include <cmath>
+
+inline double nowMs() {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // Colour helpers
 inline Color healthColor(double hp, double maxHp) {
@@ -47,6 +57,25 @@ inline void drawTextCentered(const Font& font, const char* s, float cx, float y,
 // Character capsule half-height in UE units. RootComponent sits at the capsule
 // centre, so origin +/- this gives head and feet without needing bone data.
 static constexpr float kCapsuleHalfHeight = 90.f;
+
+// Whether the ESP shows this player at all, and in what colour, by the same
+// rules drawEntity applies below, for anything drawn of them outside it. Your
+// own body is never outlined: it stands round the camera, and tracing it would
+// paint the edge of the screen.
+inline bool espColour(const EntityData& ent, Color& out) {
+    if (g_visStyle == 2 && g_visHave && !ent.visible) return false;
+    if (!ent.valid || ent.isSelf) return false;
+    if (ent.isTeammate && !g_espTeammates) return false;
+    if (ent.isSpectator && !g_espSpectators) return false;
+    const bool dim = g_visHave && g_visStyle == 1 && !ent.visible;
+    const Color col = squadColor(ent.squadIdx, ent.isSelf);
+    const int   masterA = std::clamp(g_espAlpha, 0, 255);
+    const float dimF = std::clamp(g_visDimAlpha, 0, 255) / 255.f;
+    const int   a = (int)((float)masterA * (dim ? dimF : 1.f));
+    if (a <= 0) return false;
+    out = rgba(col.r, col.g, col.b, a);
+    return true;
+}
 
 // Draw a single entity
 inline void drawEntity(const Font& font, const EntityData& ent,
@@ -243,23 +272,8 @@ inline void drawEntity(const Font& font, const EntityData& ent,
     }
 }
 
-// Triggerbot helpers
-inline bool crosshairOnBody(const EntityData& e, const FMatrix& vp,
-                            int sw, int sh, float cx, float cy, float forgive) {
-    if (e.capsuleHalf <= 20.f) return false;
-    FVector top = e.origin, bot = e.origin;
-    top.Z += e.capsuleHalf; bot.Z -= e.capsuleHalf;
-    Vec2 ts, bs;
-    if (!worldToScreen(vp, top, ts, sw, sh)) return false;
-    if (!worldToScreen(vp, bot, bs, sw, sh)) return false;
-    float h = bs.y - ts.y;
-    if (h < 2.f) return false;
-    float w  = h * 0.40f;                       // human aspect, like the ESP box
-    float bx = (ts.x + bs.x) * 0.5f;
-    return cx >= bx - w*0.5f - forgive && cx <= bx + w*0.5f + forgive
-        && cy >= ts.y      - forgive && cy <= bs.y      + forgive;
-}
-
+// How tall a player is on screen, which is what tells the hand how close is
+// close enough. The shot itself is decided in the world; this is only a size.
 inline float targetPixelHeight(const EntityData& e, const FMatrix& vp,
                                int sw, int sh) {
     if (e.capsuleHalf <= 20.f) return 0.f;
@@ -272,66 +286,35 @@ inline float targetPixelHeight(const EntityData& e, const FMatrix& vp,
     return h > 0.f ? h : 0.f;
 }
 
-// The on-target tolerance in pixels for a given body part, scaled by how big the
-// target actually is. `part`: 0 head, 1 chest, 2 body, 3 legs, 4 any bone.
-// Fractions are of full body height: a head is ~12% tall, so ~6% radius.
-inline float trigTolerance(const EntityData& e, const FMatrix& vp,
-                           int sw, int sh, int part) {
-    const float h = targetPixelHeight(e, vp, sw, sh);
-    if (h <= 0.f) return g_trigForgiveness;      // no size -> flat pixels only
-    const float frac = (part == 0) ? 0.060f      // head radius
-                     : (part == 1) ? 0.110f      // chest
-                     : (part == 2) ? 0.130f      // body/pelvis
-                     : (part == 3) ? 0.070f      // legs
-                                   : 0.045f;     // any bone / limb
-    const float tol = g_trigForgiveness + h * frac * g_trigSizeScale;
-    return tol < g_trigMinTol ? g_trigMinTol : tol;
+// How far a player has moved since the pose that was read of them. The aim
+// point is pushed forward by the same amount for the same reason, so the trigger
+// and the aim are never testing two different moments.
+inline FVector trigLead(const EntityData& e) {
+    if (!g_aimPredict || g_aimLeadMs <= 0.f) return FVector(0, 0, 0);
+    const double t = (double)g_aimLeadMs * 0.001;
+    return FVector(e.velocity.X * t, e.velocity.Y * t, e.velocity.Z * t);
 }
 
-// Standalone SKELETON test: is the crosshair on the chosen bone / any bone?
-// part: 0 head, 1 chest, 2 body(pelvis), 3 legs(feet), 4 ALL body (any segment).
-// `tol` is the already-size-scaled tolerance in pixels (see trigTolerance).
-inline bool crosshairOnSkeleton(const EntityData& e, const FMatrix& vp,
-                                int sw, int sh, float cx, float cy,
-                                float tol, int part) {
-    if (!e.rig || e.rigCount < 2) return false;
-    const skel::Rig* rg = static_cast<const skel::Rig*>(e.rig);
-    const float R = tol;
-    const float R2 = R * R;
-
-    auto proj = [&](int idx, Vec2& out) -> bool {
-        if (idx < 0 || idx >= e.rigCount) return false;
-        if (e.rigBones[idx].isZero()) return false;
-        return worldToScreen(vp, e.rigBones[idx], out, sw, sh);
-    };
-    auto nearPoint = [&](int idx) -> bool {
-        Vec2 p; if (!proj(idx, p)) return false;
-        float dx = p.x - cx, dy = p.y - cy;
-        return dx*dx + dy*dy <= R2;
-    };
-
-    if (part == 4) {
-        // ALL BODY: crosshair near any drawn bone SEGMENT (covers long limbs).
-        for (int i = 1; i < e.rigCount && i < rg->count; ++i) {
-            int pa = (i < (int)rg->parents.size()) ? rg->parents[i] : -1;
-            Vec2 a, b;
-            if (!proj(i, a) || !proj(pa, b)) continue;
-            const float vx = b.x-a.x, vy = b.y-a.y;
-            const float wx = cx-a.x, wy = cy-a.y;
-            const float len2 = vx*vx + vy*vy;
-            float t = len2 > 0.f ? (wx*vx + wy*vy) / len2 : 0.f;
-            t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
-            const float px = a.x + t*vx - cx, py = a.y + t*vy - cy;
-            if (px*px + py*py <= R2) return true;
+// The shot against one player: their own mesh when it has been read and posed
+// this pass, and the tubes when it has not, or when the mesh cannot say which
+// part a vertex belongs to and a part was asked for.
+inline hit::Result shotTest(const EntityData& e, const hit::Ray& ray, int part,
+                            double padPx, const body::Frame* frame, bool& usedMesh) {
+    const FVector lead = trigLead(e);
+    if (frame) {
+        if (const body::Body* b = body::find(*frame, e.id)) {
+            const body::RayHit mh = body::rayHit(*b, ray, part, padPx, lead);
+            if (mh.applicable) {
+                usedMesh = true;
+                hit::Result r;
+                r.hit = mh.hit;
+                r.range = mh.range;
+                r.gapPx = mh.hit ? 0.0 : mh.gapPx;
+                return r;
+            }
         }
-        return false;
     }
-    switch (part) {
-        case 0: return nearPoint(rg->head);
-        case 1: return nearPoint(rg->chest);
-        case 2: return nearPoint(rg->pelvis);
-        default: return nearPoint(rg->lFoot) || nearPoint(rg->rFoot);  // legs
-    }
+    return hit::against(e, ray, part, padPx, (double)g_trigSizeScale, lead);
 }
 
 // Click state machine, called every frame with wantFire = "on target now".
@@ -391,6 +374,8 @@ inline void renderFrame(const Font& font)
 {
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
+    g_viewW.store(sw, std::memory_order_relaxed);
+    g_viewH.store(sh, std::memory_order_relaxed);
 
     ViewInfo vi;
     {
@@ -420,6 +405,24 @@ inline void renderFrame(const Font& font)
                        g_entities[i].distance);
             }
             fflush(stdout);
+        }
+        // Each player's own outline, first, so their box and name sit on top:
+        // their mesh when it has been read, the tubes on their bones when not.
+        if (g_espOutline) {
+            const std::shared_ptr<const body::Frame> frame = body::current();
+            static std::vector<outline::Item> items;
+            items.clear();
+            int tubes = 0;
+            for (int i = 0; i < g_entityCount; i++) {
+                const EntityData& e = g_entities[i];
+                Color c;
+                if (!espColour(e, c)) continue;
+                const body::Body* b = frame ? body::find(*frame, e.id) : nullptr;
+                if (b) items.push_back({ b, nullptr, c });
+                else if (e.rig && e.rigCount > 1) { items.push_back({ nullptr, &e, c }); tubes++; }
+            }
+            g_outlineTubes = tubes;
+            outline::draw(items, vp, sw, sh, g_espOutlineWidth, g_espOutlineFill);
         }
         for (int i = 0; i < g_entityCount; i++)
             drawEntity(font, g_entities[i], vp, sw, sh);
@@ -482,12 +485,26 @@ inline void renderFrame(const Font& font)
         float bestX = 0.f, bestY = 0.f;
         bool  found = false;
         int   bestIdx = -1;
-        // The TRIGGER must test whoever is actually UNDER the crosshair -- not
-        // the aimbot's biased pick, and not gated by the aim FOV. Track the
-        // nearest-to-crosshair target independently.
-        float bestPix    = 1e30f;
-        int   bestPixIdx = -1;
+        // The line the shot will take. The trigger tests the world against it
+        // rather than measuring pixels on the screen: see hitbox.hpp.
+        const hit::Ray trigRay = trigActive ? hit::rayThrough(vp, cx, cy, sw, sh)
+                                            : hit::Ray{};
+        const int    trigPart = g_trigSkeleton
+                             ? (g_trigSkelPart < 0 || g_trigSkelPart > 4
+                                ? (int)hit::pAll : g_trigSkelPart)
+                             : (int)hit::pAll;
+        // The sliders stay in pixels because that is what a crosshair has: a
+        // pad in pixels is a pad in angle, the same at every range.
+        const double trigPad = std::max(0.f, std::max(g_trigForgiveness, g_trigMinTol));
+        double trigRange = 1e30, trigGapPx = 1e30;
+        int    trigIdx   = -1;
+        // The bodies the reader posed, held for the whole decision so every
+        // player is tested against the same pass.
+        const std::shared_ptr<const body::Frame> shotFrame =
+            (trigActive && g_trigMesh) ? body::current() : nullptr;
+        bool trigMeshUsed = false;
         float stickyScore = 1e30f;          // the held target's score, if alive
+        int   stickyIdx = -1;               // and where it sits in this frame's list
         int   considered = 0, skelCnt = 0, noSkelCnt = 0;
         bool  lockSkel = false;
         Vec2  lockPt{};
@@ -499,6 +516,20 @@ inline void renderFrame(const Font& font)
             if (e.isSpectator && g_aimIgnoreSpectators) continue;  // nobody there
             if (visFilter && !e.visible) continue;                  // behind cover
             if (e.distance > g_aimMaxDist) continue;
+
+            // THE TRIGGER asks the world: does the shot's line run through this
+            // player. Kept out of the aim's pick, and out of the FOV gate, so a
+            // biased or held target can never make it fire at someone else.
+            if (trigActive && trigRay.ok
+                && !(g_trigVisibleOnly && g_visHave && !e.visible)) {
+                const hit::Result hr = shotTest(e, trigRay, trigPart, trigPad,
+                                                shotFrame.get(), trigMeshUsed);
+                if (hr.hit) {
+                    if (hr.range < trigRange) { trigRange = hr.range; trigIdx = i; }
+                } else if (hr.gapPx > 0.0 && hr.gapPx < trigGapPx) {
+                    trigGapPx = hr.gapPx;      // for the readout, when nothing is hit
+                }
+            }
 
             // The aim point comes from the SKELETON when there is one. The
             // head bone is measured, not guessed -- readBones finds it
@@ -544,6 +575,32 @@ inline void renderFrame(const Font& font)
                                           : -half * 0.60;
             }
 
+            // Which body part this frame's aim point actually came from. The
+            // sources are not interchangeable: the rig's joint, the game's eye
+            // height and a fraction of the capsule are three different places
+            // on a player, tens of pixels apart. When the rig fails to resolve
+            // for a frame the point falls to the next source and back again,
+            // and the aim chases it both ways.
+            const int aimRank = usedSkel && (g_aimBone != 0 || e.hasHeadJoint) ? 0
+                              : (g_aimBone == 0 && e.eyeHeight > 0.f)          ? 1
+                                                                               : 2;
+            {
+                // Kept as an offset from the player, so it travels with them
+                // while it stands in for a source that is briefly missing.
+                struct Held { FVector off; double t; int rank; };
+                static std::map<uintptr_t, Held> s_hold;
+                const double nowSec = nowMs() / 1000.0;
+                if (e.id) {
+                    auto it = s_hold.find(e.id);
+                    const bool stale = (it == s_hold.end()) || (nowSec - it->second.t > 0.25);
+                    if (stale || aimRank <= it->second.rank)
+                        s_hold[e.id] = Held{aim - e.origin, nowSec, aimRank};
+                    else
+                        aim = e.origin + it->second.off;
+                    if (s_hold.size() > 256) s_hold.clear();
+                }
+            }
+
             // LEAD. Cancels the constant trail described at g_aimPredict: the
             // aim point is where the target was, so push it forward by the
             // measured velocity over the latency. Applies to the trigger too,
@@ -559,9 +616,6 @@ inline void renderFrame(const Font& font)
             if (!worldToScreen(vp, aim, sp, sw, sh)) continue;    // behind camera
             const float dx = sp.x - cx, dy = sp.y - cy;
             const float pix = std::sqrt(dx * dx + dy * dy);
-
-            // trigger's crosshair-nearest target (before any FOV gate)
-            if (pix < bestPix) { bestPix = pix; bestPixIdx = i; }
 
             float fovLimit = g_aimFovPx;
             if (g_aimDistFov) {
@@ -579,7 +633,10 @@ inline void renderFrame(const Font& font)
                               : (g_aimTargetBias > 1.f) ? 1.f : g_aimTargetBias;
             const float score = bias * nPix + (1.0f - bias) * nDist;
 
-            if (g_aimSticky && i == g_aimLockedIdx) stickyScore = score;
+            if (g_aimSticky && e.id && e.id == g_aimLockedId) {
+                stickyScore = score;
+                stickyIdx = i;
+            }
 
             if (score < bestScore) {
                 bestScore = score; bestX = dx; bestY = dy; found = true;
@@ -588,19 +645,20 @@ inline void renderFrame(const Font& font)
             }
         }
 
-        if (g_aimSticky && g_aimLockedIdx >= 0 && stickyScore < 1e29f
-            && bestIdx != g_aimLockedIdx
+        if (g_aimSticky && stickyIdx >= 0 && stickyScore < 1e29f
+            && bestIdx != stickyIdx
             && bestScore * g_aimStickiness > stickyScore) {
-            const EntityData& held = g_entities[g_aimLockedIdx];
+            const EntityData& held = g_entities[stickyIdx];
             Vec2 hp;
             FVector ha = held.hasHeadJoint ? held.headJoint : held.origin;
             if (worldToScreen(vp, ha, hp, sw, sh)) {
                 bestX = hp.x - cx; bestY = hp.y - cy;
-                bestIdx = g_aimLockedIdx; lockPt = hp; lockDist = held.distance;
+                bestIdx = stickyIdx; lockPt = hp; lockDist = held.distance;
             }
         }
         g_aimLockedIdx = found ? bestIdx : -1;
-        if (aimActive && g_aimKillPause) s_lockId = found ? g_entities[bestIdx].id : 0;
+        g_aimLockedId  = found ? g_entities[bestIdx].id : 0;
+        if (aimActive && g_aimKillPause) s_lockId = g_aimLockedId;
         g_aimTargetCnt = considered;
         g_aimSkelCnt   = skelCnt;
         g_aimNoSkelCnt = noSkelCnt;
@@ -647,36 +705,30 @@ inline void renderFrame(const Font& font)
         }
 
         // triggerbot decision
-        if (trigActive && aimActive && found && g_aimLockedIdx >= 0) {
-            // COMBINED: the aimbot is pulling toward g_aimLockedIdx. Fire only
-            // when the crosshair has actually reached that aim point, within the
-            // angular size of the part being aimed at.
+        if (trigActive && trigRay.ok && aimActive && found
+            && g_aimLockedIdx >= 0 && g_aimLockedIdx < g_entityCount) {
+            // COMBINED: the aim is pulling toward one player, so the shot is for
+            // that player and that part. Anyone who walks between the two is not
+            // what the user asked for.
             const EntityData& t = g_entities[g_aimLockedIdx];
-            const float tol = trigTolerance(t, vp, sw, sh, g_aimBone);
-            g_trigOnTargetTol = tol;
-            g_trigOnTargetPx  = g_aimLockPx;
-            trigWantFire = (g_aimLockPx <= tol);
-        } else if (trigActive && bestPixIdx >= 0
-                   && !(g_trigVisibleOnly && g_visHave
-                        && !g_entities[bestPixIdx].visible)) {
-            const EntityData& t = g_entities[bestPixIdx];
-            g_trigOnTargetPx = bestPix;
-            if (g_trigSkeleton && t.rig && t.rigCount > 1) {
-                const float tol = trigTolerance(t, vp, sw, sh, g_trigSkelPart);
-                g_trigOnTargetTol = tol;
-                trigWantFire = crosshairOnSkeleton(t, vp, sw, sh, cx, cy,
-                                                   tol, g_trigSkelPart);
-            } else {
-                // box: the box itself already scales with distance; the margin
-                // added around it must scale too or it dominates at range.
-                const float tol = trigTolerance(t, vp, sw, sh, 4);
-                g_trigOnTargetTol = tol;
-                trigWantFire = crosshairOnBody(t, vp, sw, sh, cx, cy, tol);
-            }
+            const int part = (g_aimBone >= 0 && g_aimBone <= 3) ? g_aimBone
+                                                                : (int)hit::pAll;
+            trigMeshUsed = false;      // only the locked player's test counts here
+            const hit::Result hr = shotTest(t, trigRay, part, trigPad,
+                                            shotFrame.get(), trigMeshUsed);
+            trigWantFire = hr.hit;
+            g_trigOnTargetTol = (float)trigPad;
+            g_trigOnTargetPx  = hr.hit ? 0.f : (float)hr.gapPx;
+        } else if (trigActive && trigRay.ok) {
+            trigWantFire = (trigIdx >= 0);
+            g_trigOnTargetTol = (float)trigPad;
+            g_trigOnTargetPx  = trigWantFire ? 0.f
+                              : (trigGapPx < 1e17 ? (float)trigGapPx : 0.f);
         } else {
             g_trigOnTargetTol = 0.f; g_trigOnTargetPx = 0.f;
         }
         g_trigOnTarget = trigWantFire;      // for the menu diagnostic
+        g_trigUsedMesh = trigMeshUsed;
     }
 
     else { g_aimInertiaAccX = g_aimInertiaAccY = 0.f; g_aimLockedIdx = -1; }

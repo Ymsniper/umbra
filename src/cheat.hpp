@@ -9,6 +9,7 @@
 #include "skeleton.hpp"
 #include "structs.hpp"
 #include "global.hpp"
+#include "body.hpp"
 #include "gobjects_direct.hpp"
 #include <cstdio>
 #include <chrono>
@@ -142,6 +143,46 @@ inline std::string readFString(const Mem& mem, uintptr_t addr) {
     return out;
 }
 
+// The world's own clock, which every render stamp is written from: the renderer
+// stamps a component with its view family's time, and that is the world's
+// TimeSeconds for the frame being drawn. Any component holds its world, and the
+// world's vtable says it is one before anything is read out of it.
+struct WorldClock {
+    uintptr_t world = 0;
+    double    now   = -1.0;
+    float     frame = 0.f;     // the world's own frame time, when it came along
+};
+
+// The last mesh read, so the clock can be found while you are dead or watching.
+inline uintptr_t g_clockMesh = 0;
+
+inline WorldClock readWorldClock(const Mem& mem, uintptr_t component) {
+    WorldClock c;
+    if (!component || !g_off.UActorComponent_World || !g_off.UWorld_TimeSeconds)
+        return c;
+    const uintptr_t w = mem.readPtr(component + g_off.UActorComponent_World);
+    if (!w || (w & 7)) return c;
+    if (g_off.VT_UWorld && mem.readPtr(w) != mem.modbase + g_off.VT_UWorld) return c;
+    // World.h:1782-1797 has TimeSeconds, UnpausedTimeSeconds, RealTimeSeconds and
+    // AudioTimeSeconds as doubles, then DeltaRealTimeSeconds and DeltaTimeSeconds
+    // as floats. The frame time is only taken from there when the block looks
+    // like that: four times within a pause of each other, then two frame times.
+    // When it does not, the time is still good and the frame is measured instead.
+    unsigned char blk[40];
+    if (!mem.read_raw(w + g_off.UWorld_TimeSeconds, blk, sizeof blk)) return c;
+    double d[4]; float f[2];
+    std::memcpy(d, blk, sizeof d);
+    std::memcpy(f, blk + sizeof d, sizeof f);
+    if (!std::isfinite(d[0]) || d[0] <= 0.0 || d[0] >= 1e7) return c;
+    c.world = w;
+    c.now   = d[0];
+    bool shaped = f[0] > 0.0005f && f[0] < 0.25f && f[1] > 0.0005f && f[1] < 0.25f;
+    for (int i = 1; i < 4 && shaped; i++)
+        shaped = std::isfinite(d[i]) && std::fabs(d[i] - d[0]) < 600.0;
+    if (shaped) c.frame = f[1];
+    return c;
+}
+
 // Bone reading
 inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     using namespace offsets;
@@ -152,8 +193,17 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     uintptr_t cap = (g_off.ACharacter_CapsuleComponent && g_off.Capsule_HalfHeight)
                   ? mem.readPtr(pawn + g_off.ACharacter_CapsuleComponent) : 0;
     if (cap) {
-        float hh = mem.read<float>(cap + g_off.Capsule_HalfHeight);
-        if (hh > 20.f && hh < 300.f) ent.capsuleHalf = hh;   // sane range only
+        // UCapsuleComponent declares the radius straight after the half-height,
+        // and the deprecated field beside them is editor-only, so in a shipped
+        // build the two are adjacent: one read, no second offset to derive. The
+        // engine will not let a radius exceed the half-height, which is what
+        // proves the second float is the one meant.
+        struct { float half, radius; } cs{};
+        if (mem.read_raw(cap + g_off.Capsule_HalfHeight, &cs, sizeof cs)) {
+            if (cs.half > 20.f && cs.half < 300.f) ent.capsuleHalf = cs.half;
+            if (cs.radius > 10.f && cs.radius <= cs.half)
+                ent.capsuleRadius = cs.radius;
+        }
     }
 
     // The game's own eye height for this pawn. Reflected, replicated, and exact.
@@ -165,18 +215,29 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     if (!g_off.APawn_Mesh) return;
     uintptr_t mesh = mem.readPtr(pawn + g_off.APawn_Mesh);
     if (!mesh) return;
+    g_clockMesh = mesh;
 
     if (g_off.Mesh_LastRenderTime) {
-        const float v = mem.read<float>(mesh + g_off.Mesh_LastRenderTime);
-        static std::map<uintptr_t, float> s_lrt;
-        float& g = s_lrt[pawn];
-        if (std::isfinite(v) && v > 0.f && v < 1e7f) {
-            // rises normally; a large DROP is the world clock restarting on a
-            // round change, which must be accepted rather than ignored
-            if (v > g || v < g - 5.0f) g = v;
+        // The derived stamp and the fields either side of it, in one read. One
+        // of the neighbours is the same time but only for being drawn on
+        // screen, which is the one worth believing; visibility.hpp decides
+        // which by watching them rather than by assuming an order.
+        float raw[vis::kNeighbours] = {0, 0, 0, 0, 0};
+        const uintptr_t at = mesh + g_off.Mesh_LastRenderTime + vis::kOffsets[0];
+        if (mem.read_raw(at, raw, sizeof raw)) {
+            static std::map<uintptr_t, vis::Sample> s_lrt;
+            vis::Sample& held = s_lrt[pawn];
+            for (int i = 0; i < vis::kNeighbours; i++) {
+                const float v = raw[i];
+                if (!std::isfinite(v) || v <= 0.f || v >= 1e7f) continue;
+                // Rises normally; a large drop is the level clock restarting on
+                // a round change, which has to be taken rather than ignored.
+                if (v > held.v[i] || v < held.v[i] - 5.0f) held.v[i] = v;
+            }
+            ent.renderStamps = held;
+            ent.lastRenderTime = held.v[2];
+            if (s_lrt.size() > 256) s_lrt.clear();
         }
-        ent.lastRenderTime = g;
-        if (s_lrt.size() > 256) s_lrt.clear();
     }
 
     if (!g_off.Mesh_BoneArray || !g_off.Mesh_ComponentToWorld) return;
@@ -184,28 +245,41 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     int32_t   num  = mem.read<int32_t>(mesh + g_off.Mesh_BoneArray + 8);
     if (!data || num < 8 || num > 512) return;
 
-    // ComponentToWorld
-    uintptr_t ctw = mesh + g_off.Mesh_ComponentToWorld;
-    FQuat   cq = mem.read<FQuat>  (ctw + FTransformLayout::Rotation);
-    FVector ct = mem.read<FVector>(ctw + FTransformLayout::Translation);
-    FVector cs = mem.read<FVector>(ctw + FTransformLayout::Scale3D);
+    // ComponentToWorld, in one read
+    unsigned char ctw[FTransformLayout::Scale3D + sizeof(FVector)];
+    if (!mem.read_raw(mesh + g_off.Mesh_ComponentToWorld, ctw, sizeof ctw)) return;
+    FQuat cq; FVector ct, cs;
+    std::memcpy(&cq, ctw + FTransformLayout::Rotation,    sizeof cq);
+    std::memcpy(&ct, ctw + FTransformLayout::Translation, sizeof ct);
+    std::memcpy(&cs, ctw + FTransformLayout::Scale3D,     sizeof cs);
     double qn = std::sqrt(cq.X*cq.X + cq.Y*cq.Y + cq.Z*cq.Z + cq.W*cq.W);
     if (!(qn > 0.9 && qn < 1.1)) return;          // not a real transform
+
+    // The whole bone array in one read, and everything below works out of this
+    // copy. Reading it a bone at a time, as this used to, was most of what the
+    // reader spent: a read per bone per player per pass.
+    static thread_local std::vector<uint8_t> raw;
+    raw.resize(size_t(num) * skel::kTransform);
+    if (!mem.read_raw(data, raw.data(), raw.size())) return;
+    auto boneT = [&](int i) {
+        FVector t;
+        std::memcpy(&t, raw.data() + size_t(i) * FTransformLayout::Size
+                        + FTransformLayout::Translation, sizeof t);
+        return t;
+    };
 
     // Head: the on-axis bone with the greatest local Z.
     int   bestIdx = -1;
     double bestZ  = 60.0;                          // must clear the torso
     for (int i = 0; i < num && i < 256; i++) {
-        FVector t = mem.read<FVector>(data + (uintptr_t)i * FTransformLayout::Size
-                                          + FTransformLayout::Translation);
+        const FVector t = boneT(i);
         if (std::isnan(t.X) || std::isnan(t.Y) || std::isnan(t.Z)) continue;
         if (std::fabs(t.X) > 20.0 || std::fabs(t.Y) > 20.0) continue;   // off-axis
         if (t.Z > bestZ) { bestZ = t.Z; bestIdx = i; }
     }
     if (bestIdx < 0) return;
 
-    FVector hb = mem.read<FVector>(data + (uintptr_t)bestIdx * FTransformLayout::Size
-                                       + FTransformLayout::Translation);
+    const FVector hb = boneT(bestIdx);
     // rotate by the component quaternion: v + 2w(qxv) + 2(qx(qxv))
     double vx = hb.X * cs.X, vy = hb.Y * cs.Y, vz = hb.Z * cs.Z;
     double ux = cq.Y*vz - cq.Z*vy, uy = cq.Z*vx - cq.X*vz, uz = cq.X*vy - cq.Y*vx;
@@ -216,8 +290,20 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     ent.feetWorld = FVector(ct.X, ct.Y, ct.Z);     // mesh origin = feet
     ent.hasSkeleton = true;
 
-    // ── the real hierarchy, if it resolves
-    if (!g_espSkeleton) return;
+    // ── the real hierarchy, if it resolves. The skeleton ESP draws it, the
+    // trigger tests the shot against it, and the outline poses the mesh on it,
+    // so any one of them is reason enough to read it.
+    bool wantBody = !ent.isSelf && (g_espOutline || (g_trigEnabled && g_trigMesh));
+    if (wantBody) {
+        // A body behind the camera is posed for nothing: the outline cannot
+        // draw it and the shot cannot reach it.
+        const double D2R = 3.14159265358979323846 / 180.0;
+        const double p = g_camView.Rotation.Pitch * D2R, y = g_camView.Rotation.Yaw * D2R;
+        const FVector to = ent.origin - g_camView.Location;
+        const double ahead = to.X * cos(p) * cos(y) + to.Y * cos(p) * sin(y) + to.Z * sin(p);
+        if (ahead < -300.0) wantBody = false;
+    }
+    if (!g_espSkeleton && !g_trigEnabled && !wantBody) return;
     skel::Rig* rig = skel::rigFor(mem, mesh);
     if (!rig || !rig->ok) return;
     if (num != rig->count) {
@@ -230,12 +316,25 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
         return;
     }
 
-    std::vector<uint8_t> raw(size_t(num) * skel::kTransform);
-    if (!mem.read_raw(data, raw.data(), raw.size())) return;
+    // Every bone in component space, composed once from the parent-relative
+    // copy, for the head, the named bones, the tubes and the body alike. Each
+    // of them used to walk its own way up to the root.
+    static thread_local std::vector<FQuat>   R;
+    static thread_local std::vector<FVector> P;
+    body::compose(raw, num, rig->parents, R, P);
+    auto world = [&](int idx, FVector& dst) {
+        if (idx < 0 || idx >= num) return false;
+        const FVector s{ P[idx].X * cs.X, P[idx].Y * cs.Y, P[idx].Z * cs.Z };
+        const FVector r = skel::qrot(cq, s);
+        dst = FVector(r.X + ct.X, r.Y + ct.Y, r.Z + ct.Z);
+        return std::isfinite(dst.X) && std::isfinite(dst.Y) && std::isfinite(dst.Z);
+    };
 
     // The head's LATERAL position. Height is the game's own eye height; the
     // bones supply only X and Y, which is the one thing eye height cannot give.
-    if (ent.capsuleHalf > 20.f && ent.eyeHeight > 0.f) {
+    // Only with the skeleton on, as it always was: the aim reads it, and how the
+    // aim behaves must not change because the trigger or the outline is on.
+    if (g_espSkeleton && ent.capsuleHalf > 20.f && ent.eyeHeight > 0.f) {
         // the eye, measured from the mesh origin -- which IS the feet, a capsule
         // half-height below the root
         const double eyeLocal = (double)ent.capsuleHalf + (double)ent.eyeHeight;
@@ -244,9 +343,9 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
         bool gotLateral = false;
 
         if (rig->head >= 0 && rig->head < num) {
-            FVector lp; FQuat lr;
-            if (skel::composeOneOriented(raw, num, rig->parents, rig->head,
-                                         lp, lr)) {
+            const FVector& lp = P[rig->head];
+            const FQuat&   lr = R[rig->head];
+            {
                 const double bodyH = 2.0 * (double)ent.capsuleHalf;
                 const FVector local{ bodyH * (double)g_aimHeadFwd, 0.0,
                                      bodyH * (double)g_aimHeadUp };
@@ -270,28 +369,29 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
         }
     }
 
-    auto take = [&](int idx, FVector& dst) {
-        return idx >= 0 && skel::boneWorld(mem, mesh, *rig, idx, raw, num,
-                                           cq, ct, cs, dst);
-    };
     FVector lf{}, rf{};
-    const bool okHead = take(rig->head,   ent.boneHead);
-    const bool okCh   = take(rig->chest,  ent.boneChest);
-    const bool okPel  = take(rig->pelvis, ent.bonePelvis);
-    take(rig->lFoot, lf); take(rig->rFoot, rf);
+    const bool okHead = world(rig->head,   ent.boneHead);
+    const bool okCh   = world(rig->chest,  ent.boneChest);
+    const bool okPel  = world(rig->pelvis, ent.bonePelvis);
+    world(rig->lFoot, lf); world(rig->rFoot, rf);
     ent.boneFeet = FVector((lf.X + rf.X) * 0.5, (lf.Y + rf.Y) * 0.5,
                            (lf.Z + rf.Z) * 0.5);
     (void)okCh;
     ent.hasRig = rig->ok && (okHead || okPel || num > 8);
 
-    if ((g_espSkeleton || g_trigSkeleton) && ent.hasRig) {
+    // The trigger needs the pose too, whatever the ESP is drawing: its test is
+    // the shot's line against the tubes the bones make. So does the outline,
+    // which falls back to those same tubes for a body whose mesh is not read.
+    if ((g_espSkeleton || g_trigSkeleton || g_trigEnabled || g_espOutline) && ent.hasRig) {
         ent.rig = rig;
         ent.rigCount = std::min(num, 128);
         for (int i = 0; i < ent.rigCount; ++i)
-            if (!skel::boneWorld(mem, mesh, *rig, i, raw, num, cq, ct, cs,
-                                 ent.rigBones[i]))
-                ent.rigBones[i] = FVector(0, 0, 0);
+            if (!world(i, ent.rigBones[i])) ent.rigBones[i] = FVector(0, 0, 0);
     }
+
+    // The body itself, posed on the same bones for the outline and the shot.
+    if (wantBody && ent.hasRig)
+        body::add(mem, mesh, *rig, R, P, num, cq, ct, cs, ent.id);
 }
 
 // the chain died at `self=0x0`.
@@ -1324,6 +1424,17 @@ inline void readerThread(uintptr_t UWorld2f) {
             s_hide = (int)hideSpectators;
         }
 
+        // The world's clock, read before any stamp is, so a stamp can come out
+        // newer than it but never older for having been read later. Your own
+        // mesh first; the last one read when you have none.
+        const uintptr_t clockComp = localPawn && g_off.APawn_Mesh
+                                  ? mem.readPtr(localPawn + g_off.APawn_Mesh) : 0;
+        const WorldClock worldClock = readWorldClock(mem, clockComp ? clockComp
+                                                                    : g_clockMesh);
+
+        // The bodies posed this pass go into storage the overlay is not reading.
+        body::beginFrame();
+
         EntityData tempEnts[kMaxEntities] = {};
         int count = 0;
         // Why does a roster of 12 become one box? Six `continue`s can drop a
@@ -1454,13 +1565,25 @@ inline void readerThread(uintptr_t UWorld2f) {
 
             // Name. The engine's own PlayerNamePrivate is unused on this game;
             // what the match shows is DisplayName with the discriminator after
-            // it, the same pair the scoreboard prints.
+            // it, the same pair the scoreboard prints. A name does not change
+            // during a match, so it is read once and then every few seconds,
+            // which is often enough to catch a player state reused for someone
+            // else between matches, rather than six reads a player every pass.
             if (g_off.APlayerState_DisplayName) {
-                ent.name = readFString(mem, ps + g_off.APlayerState_DisplayName);
-                if (g_off.APlayerState_Discriminator) {
-                    std::string tag = readFString(mem, ps + g_off.APlayerState_Discriminator);
-                    if (!tag.empty()) ent.name += "#" + tag;
+                struct Named { std::string name; std::chrono::steady_clock::time_point at; };
+                static std::map<uintptr_t, Named> s_names;
+                const auto now = std::chrono::steady_clock::now();
+                auto it = s_names.find(ps);
+                if (it == s_names.end() || now - it->second.at > std::chrono::seconds(3)) {
+                    std::string n = readFString(mem, ps + g_off.APlayerState_DisplayName);
+                    if (g_off.APlayerState_Discriminator) {
+                        std::string tag = readFString(mem, ps + g_off.APlayerState_Discriminator);
+                        if (!tag.empty()) n += "#" + tag;
+                    }
+                    if (s_names.size() > 512) s_names.clear();
+                    it = s_names.insert_or_assign(ps, Named{ std::move(n), now }).first;
                 }
+                ent.name = it->second.name;
             }
 
             // Bones
@@ -1529,43 +1652,112 @@ inline void readerThread(uintptr_t UWorld2f) {
 
         // ── visibility verdict
         if (g_off.Mesh_LastRenderTime && count > 0) {
-            const double wall =
-                std::chrono::duration<double>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-            const float estPrev = (g_visMaxSeen > 0.f)
-                ? g_visMaxSeen + (float)(wall - g_visMaxWall) : 0.f;
-            float mx = 0.f; int haveVals = 0;
+            const double wall = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            static vis::FieldPick pick;
+            static vis::Clock clock;
+            static std::map<uintptr_t, vis::Verdict> s_seen;
+
+            // Which of the stamps is the one for being drawn on screen, rather
+            // than drawn into a shadow map or a reflection as well.
+            for (int k = 0; k < count; k++) pick.observe(tempEnts[k].renderStamps);
+            const int idx = pick.index();
+
+            // The clock is anchored on the newest stamp anyone carries, your
+            // own mesh included. Yours is drawn far more often than anyone
+            // else's, which is what keeps the clock fresh in the moment that
+            // matters: when every enemy is behind a wall.
+            float newest = 0.f;
             for (int k = 0; k < count; k++) {
-                const float v = tempEnts[k].lastRenderTime;
-                if (v <= 0.f) continue;
-                if (estPrev > 0.f && v > estPrev + 2.0f) continue;   // impossible
-                haveVals++; if (v > mx) mx = v;
+                const vis::Sample& s = tempEnts[k].renderStamps;
+                newest = std::max(newest, std::max(s.v[2], s.v[idx]));
+            }
+            clock.feed(newest, wall);
+            clock.feedEngine(worldClock.world, worldClock.now, worldClock.frame, newest);
+            if (clock.distrustedNews()) {
+                printf("[vis] the world's clock reads %.2f while the stamps keep "
+                       "reading %.2f; judging by the stamps until the next world\n",
+                       worldClock.now, newest);
+                fflush(stdout);
             }
 
-            bool usable = (haveVals > 0);
+            // Without a single usable stamp there is nothing to judge by, and
+            // hiding everyone would be worse than showing them.
+            const bool usable = clock.have();
+            const double nowSec = clock.now();
 
-            if (usable) {
-                if (mx > g_visMaxSeen || mx < g_visMaxSeen - 5.0f) {
-                    g_visMaxSeen = mx; g_visMaxWall = wall;
-                }
-                const float est = g_visMaxSeen + (float)(wall - g_visMaxWall);
-                {
-                    int vis = 0, hid = 0;
-                    for (int k = 0; k < count; k++) {
-                        EntityData& e = tempEnts[k];
-                        e.visible = (e.lastRenderTime > 0.f)
-                                 && ((est - e.lastRenderTime) <= g_visTolerance);
-                        if (e.visible) vis++; else hid++;
-                    }
-                    g_visVisibleCnt = vis; g_visHiddenCnt = hid;
-                }
-            }
+            // Two of the game's frames is the least slack there can be: one for
+            // the render thread stamping after the clock moved on, one for this
+            // reader sampling between frames. The setting can ask for more, and
+            // asking for less only ever hid people who were on screen.
+            const float frame = clock.frameNow();
+            const double tol = std::max((double)g_visTolerance,
+                                        frame > 0.f ? 2.0 * frame + 0.004 : 0.0);
 
-            if (!usable) {
-                for (int k = 0; k < count; k++) tempEnts[k].visible = true;
-                g_visVisibleCnt = count; g_visHiddenCnt = 0;
+            // A player outside your view cannot be on your screen, so a fresh
+            // stamp on one was drawn for something else: a shadow, or a view
+            // that is not yours. Tested as a sphere round the whole body against
+            // the four sides of the view, with room to spare, so someone half
+            // in at the edge still counts as in.
+            const int vw = g_viewW.load(std::memory_order_relaxed);
+            const int vh = g_viewH.load(std::memory_order_relaxed);
+            const vis::View view(buildVPMatrix(g_camView, 0, 0),
+                                 (double)g_camView.FOV * g_fovScale,
+                                 (vw > 0 && vh > 0) ? (double)vw / vh : 16.0 / 9.0);
+            auto inView = [&](const EntityData& e) {
+                return view.holds(e.origin,
+                                  (e.capsuleHalf > 20.f ? (double)e.capsuleHalf : 90.0) + 40.0);
+            };
+
+            int shown = 0, hidden = 0, outOfView = 0;
+            for (int k = 0; k < count; k++) {
+                EntityData& e = tempEnts[k];
+                const float stamp = e.renderStamps.v[idx];
+                e.lastRenderTime = stamp;
+                bool raw = !usable
+                        || (stamp > 0.f && (nowSec - stamp) <= tol);
+                if (usable && raw && !e.isSelf && !inView(e)) { raw = false; outOfView++; }
+                vis::Verdict& v = s_seen[e.id ? e.id : (uintptr_t)(k + 1)];
+                e.visible = v.update(raw);
+                if (e.visible) shown++; else hidden++;
             }
+            if (s_seen.size() > 256) s_seen.clear();
+            g_visVisibleCnt = shown;
+            g_visHiddenCnt  = hidden;
+            g_visOutOfView  = outOfView;
             g_visHave = usable;
+            g_visMaxSeen = newest;
+            g_visMaxWall = wall;
+            g_visFieldOff  = vis::kOffsets[idx];
+            g_visFieldSure = pick.decided();
+            g_visFrameMs   = frame * 1000.f;
+            g_visTolMs     = (float)(tol * 1000.0);
+            g_visWorldClock = clock.engine();
+
+            // What the fields are doing, for the one session it takes to be
+            // sure the right one is being read.
+            static const bool probe = getenv("VIS_PROBE") != nullptr;
+            static int probeN = 0;
+            if (probe && (probeN++ % 120) == 0) {
+                printf("[vis] now %.3f by %s  field %+d%s  frame %.1f ms  "
+                       "tol %.0f ms (setting %.0f)  drawn while out of view %d\n", nowSec,
+                       clock.engine() ? "the world's clock" : "the newest stamp",
+                       vis::kOffsets[idx], pick.decided() ? " (decided)" : " (watching)",
+                       frame * 1000.f, tol * 1000.0, g_visTolerance * 1000.f, outOfView);
+                for (int k = 0; k < count && k < 6; k++) {
+                    const vis::Sample& s = tempEnts[k].renderStamps;
+                    const float st = s.v[idx];
+                    printf("      %s %-14s  -8 %9.2f  -4 %9.2f  0 %9.2f  +4 %9.2f  +8 %9.2f"
+                           "  age %7.0f ms  -> %s\n",
+                           tempEnts[k].isSelf ? "you " : "them",
+                           tempEnts[k].name.empty() ? "?" : tempEnts[k].name.substr(0, 14).c_str(),
+                           s.v[0], s.v[1], s.v[2], s.v[3], s.v[4],
+                           st > 0.f ? (nowSec - st) * 1000.0 : -1.0,
+                           tempEnts[k].visible ? "visible" : "hidden");
+                }
+                fflush(stdout);
+            }
         }
 
         {
@@ -1574,6 +1766,11 @@ inline void readerThread(uintptr_t UWorld2f) {
             g_entityCount = count;
             g_entityGen++;
         }
+        // The bodies go out with the list they were posed for, never ahead of it.
+        if (body::g_filling) g_bodyShown = body::g_filling->n;
+        body::publish();
+        g_bodyBuilt   = body::builder().built.load();
+        g_bodyRefused = body::builder().refused.load();
 
         // ~60 Hz
         auto elapsed = std::chrono::steady_clock::now() - t0;
