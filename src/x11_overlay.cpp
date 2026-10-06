@@ -137,6 +137,7 @@ KeySym keysymFor(int key) {
     switch (key) {
         case KeyInsert: return XK_Insert;
         case KeyEnd:    return XK_End;
+        case KeyPageDown: return XK_Next;
         default:        return XK_Home;
     }
 }

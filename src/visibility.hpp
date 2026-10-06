@@ -17,23 +17,29 @@
 // one that is never ahead of the other, and falls behind it at least sometimes,
 // is the on-screen one. That is what being a subset means, written as a test.
 //
-// WHAT TIME IT IS NOW. A stamp is only meaningful against the engine's own
-// clock, and that clock is not the wall clock: it pauses, it is dilated, and it
-// restarts between rounds. The renderer stamps a mesh with the world's own
-// TimeSeconds for the frame it drew, so where the world can be read, that is
-// what "now" is and nothing is estimated. Where it cannot, the newest stamp any
-// player carries stands in for it, carried forward by the wall clock between
-// samples: close enough while anyone is on screen, and drifting while nobody
-// is, which is the moment the answer matters most.
+// WHAT TIME IT IS NOW. A stamp is only meaningful against the time of the
+// latest frame drawn, and the newest stamp being written at the moment is
+// exactly that whenever anyone is being drawn: someone drawn in that frame
+// reads no age at all. Only stamps seen moving on count for it (Liveness),
+// never one that merely reads newest. Between them it is carried forward by
+// the wall clock, which runs with the game's while the game is running. The world's own TimeSeconds is
+// not that time. It is the game thread's, and the render thread stamps the
+// frame it draws a few frames later, or the clock read is not the one the
+// stamps came from at all; either way a player drawn this very frame reads
+// tens of milliseconds old against it, and a tolerance of a frame or two then
+// calls everyone on screen hidden. So the world's clock gives the game's frame
+// time, for the slack below, and stands in for the stamps only before there
+// are any.
 //
-// HOW MUCH SLACK. The render thread writes a stamp up to a frame after the
-// world's clock has moved on, and this reader samples at a rate of its own, so
-// a player drawn a moment ago reads a frame or two old. Two of the game's own
-// frames is the least that can be asked for without calling people on screen
-// hidden.
+// HOW MUCH SLACK. This reader samples at a rate of its own, and a frame is
+// drawn between one stamp and the next, so a player drawn a moment ago can
+// read a frame or so old. Two of the game's own frames is the least that can
+// be asked for without calling people on screen hidden.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
 #include "structs.hpp"
 
 namespace vis {
@@ -116,38 +122,113 @@ private:
     bool decided_ = false;
 };
 
+// Which stamps are being written right now. A stamp that moved on since it was
+// last read, by no more than the time that has passed since, belongs to a mesh
+// the game is drawing at this moment, so it is the time of the latest frame
+// drawn. One that stands still says nothing about now, whatever it reads; and
+// one that leapt further than time allows is not a stamp at all. A player being
+// killed and torn down can leave anything in those fields for a while, and the
+// newest of all the stamps, taken as now, then put every real stamp in the
+// past for good: everyone read hidden until the next level.
+//
+// Everything drawn in one frame carries that frame's time, so stamps being
+// written at the same moment agree to within a frame or two. One that runs
+// well ahead of the others moving with it is not being written by the game
+// either, whatever memory it is now; it is left out of the clock, and that
+// player is not believed for a while.
+class Liveness {
+public:
+    // Once a pass, before the stamps.
+    void begin(double wall) { wall_ = wall; cand_.clear(); }
+
+    // True when `stamp`, for whatever `key` names, is one being written now.
+    bool advance(uintptr_t key, float stamp) {
+        if (!(stamp > 0.f)) return false;
+        Rec& r = recs_[key];
+        bool live = false;
+        if (r.seen && stamp > r.stamp) {
+            const double dt = wall_ - r.wall;         // since it last moved
+            live = dt > 0.0 && (double)(stamp - r.stamp) <= dt + 0.25;
+        }
+        if (!r.seen || stamp != r.stamp) { r.stamp = stamp; r.wall = wall_; r.seen = true; }
+        if (live && trusted(key)) cand_.push_back({ key, stamp });
+        return live;
+    }
+
+    // After the stamps: the newest of those being written now that agrees with
+    // the rest, or zero when none is.
+    float newest() {
+        std::sort(cand_.begin(), cand_.end(), [](const Cand& a, const Cand& b) { return a.stamp > b.stamp; });
+        size_t first = 0;
+        while (first + 1 < cand_.size() && cand_[first].stamp > cand_[first + 1].stamp + kAgree) {
+            recs_[cand_[first].key].distrustUntil = wall_ + kDistrustFor;
+            dropped_++;
+            first++;
+        }
+        if (recs_.size() > 512) recs_.clear();
+        return first < cand_.size() ? cand_[first].stamp : 0.f;
+    }
+
+    // Not caught running ahead of the rest lately.
+    bool trusted(uintptr_t key) const {
+        auto it = recs_.find(key);
+        return it == recs_.end() || wall_ >= it->second.distrustUntil;
+    }
+    // How many times a stamp has been left out for running ahead.
+    int dropped() const { return dropped_; }
+    void reset() { recs_.clear(); cand_.clear(); }
+
+private:
+    static constexpr float  kAgree = 0.25f;        // s: frames apart, never more
+    static constexpr double kDistrustFor = 10.0;   // s
+    struct Rec { float stamp = 0.f; double wall = 0.0; bool seen = false; double distrustUntil = 0.0; };
+    struct Cand { uintptr_t key; float stamp; };
+    std::unordered_map<uintptr_t, Rec> recs_;
+    std::vector<Cand> cand_;
+    double wall_ = 0.0;
+    int dropped_ = 0;
+};
+
 // The engine's clock, anchored on the stamps themselves.
 class Clock {
 public:
-    // `newest` is the newest stamp seen this frame, from any mesh, or zero when
-    // nothing was rendered. `wall` is any steady clock, in seconds.
-    void feed(float newest, double wall) {
-        if (newest > 0.f) {
-            // A big step backwards is the level clock restarting, which has to
-            // be taken rather than ignored, or everything reads hidden forever.
-            if (newest > anchor_ || newest < anchor_ - 5.f) {
-                // How far the stamp jumps when it jumps is the game's own frame,
-                // measured rather than assumed. It is the floor under any
-                // tolerance: a stamp written one frame ago is not a player who
-                // has gone anywhere, and asking for less slack than that calls
-                // half the people on screen hidden.
-                const float step = newest - anchor_;
-                if (have_ && step > 0.001f && step < 0.5f) {
-                    steps_[stepAt_++ % kSteps] = step;
-                    if (stepN_ < kSteps) stepN_++;
-                }
-                anchor_ = newest;
-                anchorWall_ = wall;
-                have_ = true;
+    // `live` is the newest of the stamps being written now (see Liveness), or
+    // zero when none is. `wall` is any steady clock, in seconds. It is taken
+    // as it comes, earlier than before or not: a stamp being written now is
+    // the time of the latest frame drawn, so whatever the anchor held before,
+    // this is now, and an anchor that something false pushed ahead is put right
+    // by the next player drawn. A new level's clock, restarted from nothing, is
+    // taken the same way.
+    void feed(float live, double wall) {
+        if (live > 0.f) {
+            // How far it moves on between frames is the game's own frame,
+            // measured rather than assumed. It is the floor under any
+            // tolerance: a stamp written one frame ago is not a player who has
+            // gone anywhere, and asking for less slack than that calls half the
+            // people on screen hidden.
+            const float step = live - anchor_;
+            if (have_ && step > 0.001f && step < 0.5f) {
+                steps_[stepAt_++ % kSteps] = step;
+                if (stepN_ < kSteps) stepN_++;
             }
+            anchor_ = live;
+            anchorWall_ = wall;
+            have_ = true;
         }
         wall_ = wall;
     }
 
+    // How long since a stamp was last seen being written, which is how long the
+    // clock has been running on the wall clock alone.
+    double sinceLive() const { return have_ ? wall_ - anchorWall_ : -1.0; }
+
+    // Now as it stood before this pass's stamps: the anchor carried to `wall`.
+    double at(double wall) const { return have_ ? anchor_ + (wall - anchorWall_) : 0.0; }
+
     // The middle of the recent jumps, so one long hitch does not set the floor.
     float frame() const {
         if (stepN_ == 0) return 0.f;
-        float v[kSteps];
+        float v[kSteps] = {0};
         for (int i = 0; i < stepN_; i++) v[i] = steps_[i];
         for (int i = 1; i < stepN_; i++)
             for (int j = i; j > 0 && v[j] < v[j-1]; j--) std::swap(v[j], v[j-1]);
@@ -156,8 +237,9 @@ public:
 
     // The world's own time, read from the world itself. `t` is negative when
     // it could not be read, and `frame` is zero when the world's frame time did
-    // not come with it. When it is good it replaces everything above: the
-    // stamps are written from this very clock, so there is nothing to estimate.
+    // not come with it. It is trusted for the game's frame time, and stands in
+    // for the stamps only before there are any; see WHAT TIME IT IS NOW.
+    // `newest` is the newest stamp being written now, as fed above.
     void feedEngine(uintptr_t world, double t, float frame, float newest) {
         engineOk_ = false;
         if (world != world_) {                 // a new level, a new world
@@ -194,11 +276,19 @@ public:
         return false;
     }
 
-    // Now, on the engine's clock. Read from the world when it can be; between
-    // anchors otherwise, running on the wall clock, which is right while the
-    // game is running at all and wrong while it is paused or loading.
+    // Now, on the stamps' own clock: the newest stamp, carried forward by the
+    // wall clock since it last moved. The world's clock only before any stamp.
     double now() const {
-        return engineOk_ ? engineNow_ : anchor_ + (wall_ - anchorWall_);
+        if (have_) return anchor_ + (wall_ - anchorWall_);
+        return engineOk_ ? engineNow_ : 0.0;
+    }
+
+    // How far the world's clock runs ahead of the stamps' while both are
+    // live, for the probe: the gap that judging by the world's clock used to
+    // count against everyone. Negative when it cannot be said.
+    double worldAhead() const {
+        if (!engineOk_ || !have_ || wall_ - anchorWall_ > 0.25) return -1.0;
+        return engineNow_ - (anchor_ + (wall_ - anchorWall_));
     }
 
     // The world's own frame time when it came with the clock, and the middle

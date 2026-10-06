@@ -31,7 +31,7 @@ int sonarMain(SharedState* sh);
 static void sigHandler(int) { g_running = false; }
 
 // Config
-static constexpr const char*    kUmbraVersion = "1.6.0";
+static constexpr const char*    kUmbraVersion = "1.6.1";
 // The game's executable has shipped under both of these names. Whichever one
 // the running game maps is the one whose encrypted decoy image has to be told
 // apart from the real one.
@@ -89,6 +89,7 @@ static void publishStatus(SharedState* sh) {
     st.visFieldOff     = (int8_t)g_visFieldOff;
     st.visFieldSure    = g_visFieldSure ? 1 : 0;
     st.visFrameMs      = g_visFrameMs;
+    st.visBehindNear   = (int16_t)g_visBehindNear;
     st.visTolMs        = g_visTolMs;
     st.visWorldClock   = g_visWorldClock ? 1 : 0;
     st.trigHeld        = g_trigHeld      ? 1 : 0;
@@ -316,6 +317,13 @@ int main(int argc, char* argv[]) {
                 printf("[aim] %s (HOME)\n", g_aimEnabled ? "ENABLED" : "disabled");
             }
             prevHome = nowHome;
+
+            // PAGE DOWN bookmarks the moment in vis.log, with what every
+            // player's stamps read then, for a verdict that looked wrong.
+            static bool prevMark = false;
+            const bool nowMark = ovl::keyDown(ovl::KeyPageDown);
+            if (nowMark && !prevMark) g_visMarkSeq.fetch_add(1, std::memory_order_relaxed);
+            prevMark = nowMark;
 
             const bool lmb = ovl::lmbDown();
             const bool rmb = ovl::rmbDown();

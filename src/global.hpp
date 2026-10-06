@@ -210,7 +210,10 @@ inline float  g_visTolMs       = 0.f;    // the slack actually used, setting or 
 // The overlay's size, which the reader needs to know how wide the view is.
 inline std::atomic<int> g_viewW{0}, g_viewH{0};
 inline int    g_visOutOfView   = 0;      // runtime: fresh stamps on players out of view
+inline int    g_visBehindNear  = -1;     // runtime: % of readings of players behind you within 50 m
+                                         // that were drawn, over the last half minute; -1 too few
 inline bool   g_visWorldClock  = false;  // timed by the world's own clock
+inline std::atomic<uint32_t> g_visMarkSeq{ 0 };   // PAGE DOWN presses, for vis.log
 inline int    g_visFieldOff    = 0;      // runtime: which stamp is being read
 inline bool   g_visFieldSure   = false;
 inline int    g_visVisibleCnt  = 0;      // diagnostics for the menu

@@ -173,6 +173,7 @@ does not wait for the answer.
 |-----|--------|
 | `INSERT` | Toggle the settings menu. While open, the overlay takes mouse clicks; while closed, clicks pass through to the game. |
 | `HOME` | Toggle the aim assist. |
+| `PAGE DOWN` | Mark the moment in `vis.log`, for a visibility verdict that looked wrong. |
 | `End` | Quit, with the overlay focused. `Ctrl-C` in the terminal also works. |
 
 Settings are edited in the menu and written to `settings.cfg` a few seconds
@@ -311,19 +312,25 @@ it last drew it, so reading that stamp answers whether a player can be seen far
 better than anything computed from outside: it is the same answer the game acted
 on, occlusion, culling and blown-open walls included.
 
-* **The clock.** A stamp means nothing without the engine's own clock, which
-  pauses, is dilated and restarts between rounds. It is read from the world
-  itself, the clock the stamps are written from, and only believed while the two
-  agree; without that offset the newest stamp anyone carries stands in for it.
-* **The slack.** The game writes a stamp a frame or so after its clock has moved
-  on, and the tool reads at a rate of its own, so a player counts as drawn for
-  at least two of the game's own frames, measured as it runs. The tolerance
-  slider can ask for more than that, never less.
+* **The clock.** A stamp means nothing without the time of the latest frame
+  drawn, and the newest stamp being written at the moment is exactly that: a
+  player drawn in that frame reads no age at all. Only stamps seen moving on,
+  by no more than the time that passed and in step with each other, count for
+  it, so what is left of a player being killed can never set it. While nobody
+  is drawn it runs on the wall clock. The world's own clock is the game
+  thread's, a few frames ahead of the stamps, so it only gives the frame time.
+* **The slack.** The tool reads at a rate of its own, so a player counts as
+  drawn for at least two of the game's own frames, measured as it runs. The
+  tolerance slider can ask for more than that, never less.
 * **Out of view.** Someone outside your view cannot be on your screen, so a fresh
   stamp on them was drawn for something else, their shadow for one, and they
   count as hidden.
 * **Steady.** A verdict has to hold for two frames before it changes, so a
   player in a doorway does not flicker between seen and hidden.
+* **The log.** What it sees goes to `vis.log` beside `settings.cfg`: every
+  player's stamps once a second, and at once each verdict that turns, each
+  player leaving the list, and the clock being put right. `PAGE DOWN` marks a
+  moment that looked wrong, with everyone's stamps as they were.
 
 <img width="910" height="249" alt="visibility" src="https://github.com/user-attachments/assets/5f4dfb99-9d1b-4498-93db-89cb16cc9709" />
 
@@ -335,7 +342,10 @@ box is not wholly hidden, and that box is larger than the player, so someone
 just behind a corner or a low wall can still read as visible, and occlusion lags
 a frame or two. The engine also keeps a second stamp meant for being drawn on
 screen alone; the tool looks for it among the neighbouring fields, and the
-Visibility tab says which stamp it is reading.
+Visibility tab says which stamp it is reading. With ray-traced lighting the
+engine stamps every moving thing within 50 m every frame, walls or not; players
+behind you that keep reading drawn give that away, and the Visibility tab says
+so when it sees it.
 
 ---
 
@@ -395,7 +405,7 @@ src/
   outline.hpp           the outline: the body's mask and the edge traced round it
   body.hpp              a player's mesh, read once and posed on the live bones
   hitbox.hpp            the shot's line against tubes along the bones
-  visibility.hpp        render stamps, the engine's clock, the view test
+  visibility.hpp        render stamps, which of them say what time it is, the view test
   global.hpp            state shared between reader and render threads
   structs.hpp           engine types and world-to-screen projection
   skeleton.hpp          bone hierarchy composition

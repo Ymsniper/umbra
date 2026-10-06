@@ -66,6 +66,7 @@ struct Status {
     float    trigOnTargetTol= 0.f;
     float    camFov         = 0.f;
     float    visFrameMs     = 0.f;
+    int16_t  visBehindNear  = -1;   // % drawn while behind you, within 50 m
     float    visTolMs       = 0.f;
     uint8_t  visWorldClock  = 0;
     uint64_t kmodOk         = 0;

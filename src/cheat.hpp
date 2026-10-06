@@ -9,9 +9,12 @@
 #include "skeleton.hpp"
 #include "structs.hpp"
 #include "global.hpp"
+#include "settings.hpp"
 #include "body.hpp"
 #include "gobjects_direct.hpp"
+#include <cstdarg>
 #include <cstdio>
+#include <sys/stat.h>
 #include <chrono>
 #include <map>
 #include <ctime>
@@ -215,6 +218,10 @@ inline void readBones(const Mem& mem, uintptr_t pawn, EntityData& ent) {
     if (!g_off.APawn_Mesh) return;
     uintptr_t mesh = mem.readPtr(pawn + g_off.APawn_Mesh);
     if (!mesh) return;
+    // A pawn being torn down can point anywhere. Only a mesh that is still one
+    // of the game's objects is read, or its stamps and bones are whatever that
+    // memory holds now.
+    if ((mesh & 7) || !mem.vtableInModule(mem.readPtr(mesh))) return;
     g_clockMesh = mesh;
 
     if (g_off.Mesh_LastRenderTime) {
@@ -1205,6 +1212,44 @@ inline bool worldStillValid(const Mem& mem, uintptr_t ctrl) {
     return true;
 }
 
+// What visibility saw, in vis.log beside settings.cfg: every player's stamps a
+// second, and at once whatever has gone wrong before: someone leaving the list,
+// a verdict turning, a stamp reading ahead of now, the clock put back, and
+// PAGE DOWN pressed over a verdict that looked wrong. A match played is then
+// enough to see why, with nothing pasted.
+struct VisLog {
+    FILE* f = nullptr;
+    bool tried = false;
+    void say(const char* fmt, ...) {
+        if (!f && !tried) {
+            tried = true;
+            const std::string& sp = settingsPath();
+            const size_t slash = sp.find_last_of('/');
+            const std::string path = (slash == std::string::npos ? std::string() : sp.substr(0, slash + 1))
+                                   + "vis.log";
+            struct stat st{};
+            if (::stat(path.c_str(), &st) == 0 && st.st_size > 20 * 1024 * 1024)
+                std::rename(path.c_str(), (path + ".old").c_str());
+            f = fopen(path.c_str(), "a");
+        }
+        if (!f) return;
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        const int ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now.time_since_epoch()).count() % 1000);
+        std::tm tmv{};
+        localtime_r(&tt, &tmv);
+        fprintf(f, "%02d:%02d:%02d.%03d ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ms);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(f, fmt, ap);
+        va_end(ap);
+        fputc('\n', f);
+        fflush(f);
+    }
+};
+inline VisLog g_visLog;
+
 inline void readerThread(uintptr_t UWorld2f) {
     using namespace offsets;
     auto& mem = g_mem;
@@ -1657,28 +1702,45 @@ inline void readerThread(uintptr_t UWorld2f) {
 
             static vis::FieldPick pick;
             static vis::Clock clock;
+            static vis::Liveness liveness;
             static std::map<uintptr_t, vis::Verdict> s_seen;
 
             // Which of the stamps is the one for being drawn on screen, rather
             // than drawn into a shadow map or a reflection as well.
             for (int k = 0; k < count; k++) pick.observe(tempEnts[k].renderStamps);
             const int idx = pick.index();
+            static int s_idx = -1;
+            if (idx != s_idx) {
+                if (s_idx >= 0)
+                    g_visLog.say("reading the stamp at %+d from now on (was %+d)", vis::kOffsets[idx],
+                                 vis::kOffsets[s_idx]);
+                s_idx = idx;
+            }
 
-            // The clock is anchored on the newest stamp anyone carries, your
-            // own mesh included. Yours is drawn far more often than anyone
-            // else's, which is what keeps the clock fresh in the moment that
-            // matters: when every enemy is behind a wall.
+            // The clock is anchored on the newest stamp being written at the
+            // moment, your own mesh's included whenever the game draws it, and
+            // carried on by the wall clock while every enemy is behind a wall.
             float newest = 0.f;
+            liveness.begin(wall);
+            const int droppedBefore = liveness.dropped();
             for (int k = 0; k < count; k++) {
                 const vis::Sample& s = tempEnts[k].renderStamps;
-                newest = std::max(newest, std::max(s.v[2], s.v[idx]));
+                const float st = std::max(s.v[2], s.v[idx]);
+                newest = std::max(newest, st);
+                liveness.advance(tempEnts[k].id ? tempEnts[k].id : (uintptr_t)(k + 1), st);
             }
-            clock.feed(newest, wall);
-            clock.feedEngine(worldClock.world, worldClock.now, worldClock.frame, newest);
+            const float live = liveness.newest();
+            if (liveness.dropped() != droppedBefore)
+                g_visLog.say("a stamp being written ran ahead of the rest by more than frames can; "
+                             "left out of the clock, and its player not believed for ten seconds");
+            const bool hadClock = clock.have();
+            const double before = clock.at(wall);
+            clock.feed(live, wall);
+            clock.feedEngine(worldClock.world, worldClock.now, worldClock.frame, live);
             if (clock.distrustedNews()) {
                 printf("[vis] the world's clock reads %.2f while the stamps keep "
-                       "reading %.2f; judging by the stamps until the next world\n",
-                       worldClock.now, newest);
+                       "reading %.2f; taking the frame time from the stamps until the "
+                       "next world\n", worldClock.now, live);
                 fflush(stdout);
             }
 
@@ -1686,6 +1748,9 @@ inline void readerThread(uintptr_t UWorld2f) {
             // hiding everyone would be worse than showing them.
             const bool usable = clock.have();
             const double nowSec = clock.now();
+            if (hadClock && live > 0.f && before - nowSec > 0.05)
+                g_visLog.say("the clock had run %.0f ms ahead of the stamps being drawn; put back",
+                             (before - nowSec) * 1000.0);
 
             // Two of the game's frames is the least slack there can be: one for
             // the render thread stamping after the clock moved on, one for this
@@ -1710,19 +1775,112 @@ inline void readerThread(uintptr_t UWorld2f) {
                                   (e.capsuleHalf > 20.f ? (double)e.capsuleHalf : 90.0) + 40.0);
             };
 
+            auto nameOf = [&](const EntityData& e) {
+                return e.name.empty() ? std::string("?") : e.name.substr(0, 20);
+            };
             int shown = 0, hidden = 0, outOfView = 0;
+            bool fresh[kMaxEntities] = {}, inViewOf[kMaxEntities] = {};
+            static std::map<uintptr_t, double> s_aheadSaid;
             for (int k = 0; k < count; k++) {
                 EntityData& e = tempEnts[k];
                 const float stamp = e.renderStamps.v[idx];
                 e.lastRenderTime = stamp;
-                bool raw = !usable
-                        || (stamp > 0.f && (nowSec - stamp) <= tol);
-                if (usable && raw && !e.isSelf && !inView(e)) { raw = false; outOfView++; }
-                vis::Verdict& v = s_seen[e.id ? e.id : (uintptr_t)(k + 1)];
+                const uintptr_t key = e.id ? e.id : (uintptr_t)(k + 1);
+                // A player whose stamp was caught running ahead of the rest is
+                // not being drawn by the game, whatever that stamp says.
+                fresh[k] = stamp > 0.f && (nowSec - stamp) <= tol && liveness.trusted(key);
+                inViewOf[k] = e.isSelf || inView(e);
+                bool raw = !usable || fresh[k];
+                if (usable && raw && !inViewOf[k]) { raw = false; outOfView++; }
+                vis::Verdict& v = s_seen[key];
+                const bool was = v.state();
                 e.visible = v.update(raw);
                 if (e.visible) shown++; else hidden++;
+                if (!e.isSelf && e.visible != was)
+                    g_visLog.say("%s: %s, %.1f m, stamp %.0f ms old, %s", nameOf(e).c_str(),
+                                 e.visible ? "visible" : "hidden", e.distance,
+                                 stamp > 0.f ? (nowSec - stamp) * 1000.0 : -1.0,
+                                 inViewOf[k] ? "in view" : "out of view");
+                // A stamp past now cannot be one the game wrote; said once in a
+                // while for each, since it is what put everyone in the past.
+                if (usable && stamp > nowSec + 0.05) {
+                    double& said = s_aheadSaid[key];
+                    if (wall - said > 2.0) {
+                        said = wall;
+                        g_visLog.say("%s: a stamp %.0f ms ahead of now (%.3f against %.3f), health %.0f%s",
+                                     nameOf(e).c_str(), (stamp - nowSec) * 1000.0, stamp, nowSec, e.health,
+                                     e.isSpectator ? ", spectating" : "");
+                    }
+                }
             }
             if (s_seen.size() > 256) s_seen.clear();
+            if (s_aheadSaid.size() > 256) s_aheadSaid.clear();
+
+            // Who came and went, which is when things have gone wrong before.
+            {
+                static std::map<uintptr_t, std::string> s_listed;
+                std::map<uintptr_t, std::string> now;
+                for (int k = 0; k < count; k++)
+                    if (tempEnts[k].id && !tempEnts[k].isSelf) now[tempEnts[k].id] = nameOf(tempEnts[k]);
+                for (const auto& [id, n] : s_listed)
+                    if (!now.count(id)) g_visLog.say("%s left the list", n.c_str());
+                for (const auto& [id, n] : now)
+                    if (!s_listed.count(id) && !s_listed.empty()) g_visLog.say("%s came into the list", n.c_str());
+                s_listed.swap(now);
+            }
+
+            // Drawn while behind you can only be for something other than your
+            // view: shadows, or lighting that traces every moving thing near
+            // you. Counted by range over half a minute.
+            {
+                static int nearN = 0, nearDrawn = 0, farN = 0, farDrawn = 0;
+                static double nextSay = wall + 30.0;
+                for (int k = 0; k < count; k++) {
+                    if (tempEnts[k].isSelf || inViewOf[k]) continue;
+                    if (tempEnts[k].distance < 50.f) { nearN++; if (fresh[k]) nearDrawn++; }
+                    else { farN++; if (fresh[k]) farDrawn++; }
+                }
+                if (wall >= nextSay) {
+                    nextSay = wall + 30.0;
+                    g_visBehindNear = nearN >= 20 ? nearDrawn * 100 / nearN : -1;
+                    if (nearN + farN > 0)
+                        g_visLog.say("behind you, over half a minute: drawn in %d of %d readings within 50 m, "
+                                     "%d of %d past it", nearDrawn, nearN, farDrawn, farN);
+                    nearN = nearDrawn = farN = farDrawn = 0;
+                }
+            }
+
+            // Every player once a second, and at once on PAGE DOWN.
+            {
+                static double nextSnap = 0.0;
+                static uint32_t markSeen = g_visMarkSeq.load();
+                const uint32_t mark = g_visMarkSeq.load(std::memory_order_relaxed);
+                const bool marked = mark != markSeen;
+                markSeen = mark;
+                if (marked || wall >= nextSnap) {
+                    nextSnap = wall + 1.0;
+                    const double ahead = clock.worldAhead();
+                    char aheadTxt[48] = "not read";
+                    if (ahead > -0.5) snprintf(aheadTxt, sizeof aheadTxt, "%.0f ms ahead", ahead * 1000.0);
+                    g_visLog.say("%snow %.3f, a stamp last seen being written %.0f ms ago; frame %.1f ms, "
+                                 "slack %.0f ms (setting %.0f); stamp at %+d%s; world clock %s; "
+                                 "shown %d, hidden %d, out of view %d",
+                                 marked ? "MARK (PAGE DOWN): " : "", nowSec, clock.sinceLive() * 1000.0,
+                                 frame * 1000.f, tol * 1000.0, g_visTolerance * 1000.f, vis::kOffsets[idx],
+                                 pick.decided() ? "" : " (still watching)", aheadTxt, shown, hidden, outOfView);
+                    for (int k = 0; k < count; k++) {
+                        const EntityData& e = tempEnts[k];
+                        const vis::Sample& s = e.renderStamps;
+                        const float st = s.v[idx];
+                        g_visLog.say("  %-20s %5.1f m  %-11s stamps %.3f %.3f  %6.0f ms old  hp %.0f%s%s -> %s",
+                                     nameOf(e).c_str(), e.distance, inViewOf[k] ? "in view" : "out of view",
+                                     s.v[2], s.v[3], st > 0.f ? (nowSec - st) * 1000.0 : -1.0, e.health,
+                                     e.isSpectator ? " spectating" : "", e.isSelf ? " (you)" : "",
+                                     e.visible ? "VISIBLE" : "hidden");
+                    }
+                }
+            }
+
             g_visVisibleCnt = shown;
             g_visHiddenCnt  = hidden;
             g_visOutOfView  = outOfView;
@@ -1740,11 +1898,16 @@ inline void readerThread(uintptr_t UWorld2f) {
             static const bool probe = getenv("VIS_PROBE") != nullptr;
             static int probeN = 0;
             if (probe && (probeN++ % 120) == 0) {
-                printf("[vis] now %.3f by %s  field %+d%s  frame %.1f ms  "
-                       "tol %.0f ms (setting %.0f)  drawn while out of view %d\n", nowSec,
-                       clock.engine() ? "the world's clock" : "the newest stamp",
-                       vis::kOffsets[idx], pick.decided() ? " (decided)" : " (watching)",
-                       frame * 1000.f, tol * 1000.0, g_visTolerance * 1000.f, outOfView);
+                const double ahead = clock.worldAhead();
+                char aheadTxt[64] = "the world's clock not read";
+                if (ahead > -0.5)
+                    snprintf(aheadTxt, sizeof aheadTxt, "the world's clock %.0f ms ahead of it",
+                             ahead * 1000.0);
+                printf("[vis] now %.3f by the newest stamp (%s)  field %+d%s  frame %.1f ms "
+                       "from %s  tol %.0f ms (setting %.0f)  drawn while out of view %d\n", nowSec,
+                       aheadTxt, vis::kOffsets[idx], pick.decided() ? " (decided)" : " (watching)",
+                       frame * 1000.f, clock.engine() ? "the world" : "the stamps", tol * 1000.0,
+                       g_visTolerance * 1000.f, outOfView);
                 for (int k = 0; k < count && k < 6; k++) {
                     const vis::Sample& s = tempEnts[k].renderStamps;
                     const float st = s.v[idx];

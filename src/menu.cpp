@@ -398,8 +398,8 @@ static void drawSettingsPanel(const Status& st) {
                 ImGui::TextDisabled("frame %.1f ms, waiting %.0f ms",
                                     st.visFrameMs, st.visTolMs);
         }
-        ImGui::TextDisabled(st.visWorldClock ? "timed by the world's own clock"
-                                             : "timed from the newest stamp (no world clock)");
+        ImGui::TextDisabled(st.visWorldClock ? "timed from the newest stamp, the frame from the world's clock"
+                                             : "timed from the newest stamp, the frame from the stamps");
         // Which of the engine's two stamps is being read: the one for being
         // drawn at all, or the one for being drawn on your screen.
         if (st.visFieldSure)
@@ -409,6 +409,15 @@ static void drawSettingsPanel(const Status& st) {
                                 (int)st.visFieldOff);
         else
             ImGui::TextDisabled("watching the stamps to see which is on-screen only");
+        // Behind you nothing can be on your screen, so players there that keep
+        // reading drawn are being drawn for something else, and near you their
+        // stamp cannot tell a wall from a clear view.
+        if (st.visBehindNear >= 50)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+                               "Players behind you within 50 m read drawn %d%% of the time: the game draws "
+                               "them for more than your view (ray-traced lighting does this to everything "
+                               "moving within 50 m), so near you a stamp cannot see walls.",
+                               (int)st.visBehindNear);
         if (!st.visHave) ImGui::EndDisabled();
         else {
             ImGui::Separator();
@@ -416,6 +425,8 @@ static void drawSettingsPanel(const Status& st) {
             ImGui::SameLine();
             ImGui::TextDisabled("/ %d hidden", st.visHiddenCnt);
         }
+        ImGui::TextDisabled("What it sees goes to vis.log beside settings.cfg. PAGE DOWN in the game marks "
+                            "a moment that looked wrong.");
         ImGui::EndTabItem();
     }
 

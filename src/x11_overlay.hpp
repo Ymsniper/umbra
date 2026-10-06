@@ -84,6 +84,6 @@ bool keyDown(int key);          // see Key below
 // pointer grab and by the overlay never being focused.
 bool pointer(int& x, int& y, bool& lmb, bool& rmb);
 
-enum Key { KeyHome = 0, KeyInsert, KeyEnd };
+enum Key { KeyHome = 0, KeyInsert, KeyEnd, KeyPageDown };
 
 }  // namespace ovl
